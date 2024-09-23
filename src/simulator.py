@@ -179,6 +179,7 @@ class Simulator:
                 isothermal=self.isothermal,
                 thdiffusion=self.thdiffusion,
                 _t_=self._t_,
+                npassive=self.npassive,
                 **kwargs)
                 
     def compute_conservatives(self,W,**kwargs)->np.ndarray:
@@ -190,6 +191,7 @@ class Simulator:
                 isothermal=self.isothermal,
                 thdiffusion=self.thdiffusion,
                 _t_=self._t_,
+                npassive=self.npassive,
                 **kwargs)
     
     def compute_fluxes(self,F,M,vels,prims)->np.ndarray:
@@ -203,7 +205,8 @@ class Simulator:
                              self._p_,
                              self.gamma,
                              F=F,
-                             isothermal=self.isothermal)
+                             isothermal=self.isothermal,
+                             npassive=self.npassive)
 
     def compute_viscous_fluxes(self,M,dMs,vels,prims=False)->np.ndarray:
         assert len(vels)==self.ndim
@@ -231,5 +234,12 @@ class Simulator:
     def compute_dt(self) -> None:
         pass
 
+    def riemann_solver(self,solver):
+        return lambda ML,MR,vels,prims : solver(ML,MR,vels,prims,
+                                                _p_ = self._p_,
+                                                gamma = self.gamma,
+                                                min_c2 = self.min_c2,
+                                                isothermal=self.isothermal,
+                                                npassive=self.npassive)
     
 

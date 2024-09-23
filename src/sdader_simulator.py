@@ -230,7 +230,8 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
                                        self.gamma,
                                        self.min_c2,
                                        prims,
-                                       isothermal=self.isothermal)
+                                       isothermal=self.isothermal,
+                                       npassive=self.npassive)
             bc.apply_interfaces(self,F,self.F_ader_fp[dim],dim)
             if self.WB:
                 #F->F'
@@ -273,7 +274,7 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
             self.F_ader_fp[dim][...] -= self.compute_viscous_fluxes(self.M_ader_fp[dim],dW_fp,vels,prims=True)
             if self.thdiffusion:
                 #Add thermal flux
-                self.F_ader_fp[dim][...] -= self.compute_thermal_fluxes(self.M_ader_fp[dim],dW_fp[self.dims[dim]],prims=True)
+                self.F_ader_fp[dim][self._p_] -= self.compute_thermal_fluxes(self.M_ader_fp[dim],dW_fp[self.dims[dim]],prims=True)
 
     ####################
     ## Finite volume

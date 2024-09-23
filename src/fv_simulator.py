@@ -159,7 +159,8 @@ class FV_Simulator(Simulator):
                                         self.gamma,
                                         self.min_c2,
                                         prims,
-                                        isothermal=self.isothermal)
+                                        isothermal=self.isothermal,
+                                        npassive=self.npassive)
         if self.WB:
             #We compute the perturbation over the flux for conservative variables
             F -= self.dm.__getattribute__(f"F_eq_faces_{dim}")

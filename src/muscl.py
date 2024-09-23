@@ -258,4 +258,4 @@ def compute_nabla_terms(self: Simulator,
         F[dim][...] -= self.compute_viscous_fluxes(self.ML_faces[dim],dW_f,vels,prims=True)
         if self.thdiffusion:
             #Add thermal flux
-            F[dim][...] -= self.compute_thermal_fluxes(self.ML_faces[dim],dW_f[self.dims[dim]],prims=True)
+            F[dim][self._p_] -= self.compute_thermal_fluxes(self.ML_faces[dim],dW_f[self.dims[dim]],prims=True)

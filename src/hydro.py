@@ -54,7 +54,8 @@ def compute_primitives(
         _t_=None,
         W=None,
         isothermal: bool = False,
-        thdiffusion: bool = False)->np.ndarray:
+        thdiffusion: bool = False,
+        npassive=0)->np.ndarray:
     """
     Transforms array of conservative to primitive variables
 
@@ -87,7 +88,9 @@ def compute_primitives(
     W[_p_] = (gamma-1)*(U[_p_]-K)
     if thdiffusion:
         W[_t_] = W[_p_]/W[_d_]
-
+    if npassive>0:
+        _ps_ = _p_+1
+        W[_ps_:_ps_+npassive] = U[_ps_:_ps_+npassive]/U[_d_]
     return W
                 
 def compute_conservatives(
@@ -99,7 +102,8 @@ def compute_conservatives(
         _t_ = None,
         U=None,
         isothermal: bool = False,
-        thdiffusion: bool = False)->np.ndarray:
+        thdiffusion: bool = False,
+        npassive=0)->np.ndarray:
     """
     Transforms array of primitive to conservative variables
 
@@ -130,7 +134,10 @@ def compute_conservatives(
     K *= 0 if isothermal else 1
     U[_p_] = W[_p_]/(gamma-1)+K
     if thdiffusion:
-        W[_t_] = W[_p_]/W[_d_]
+        U[_t_] = W[_p_]/W[_d_]
+    if npassive>0:
+        _ps_ = _p_+1
+        U[_ps_:_ps_+npassive] = W[_ps_:_ps_+npassive]*U[_d_]
     return U
 
 def compute_fluxes(
@@ -140,7 +147,8 @@ def compute_fluxes(
         gamma: float,
         _d_: int = 0,
         F=None,
-        isothermal: bool = False)->np.ndarray:
+        isothermal: bool = False,
+        npassive=0)->np.ndarray:
     """
     Returns array of conservative fluxes
 
@@ -176,6 +184,9 @@ def compute_fluxes(
     F[v1,...] = m*W[v1] + W[_p_]
     F[_p_,...] = W[v1]*(E + W[_p_])
     F[_p_,...] *= 0 if isothermal else 1
+    if npassive>0:
+        _ps_ = _p_+1
+        F[_ps_:_ps_+npassive,...] = m*W[_ps_:_ps_+npassive]
     return F
 
 def compute_viscous_fluxes(

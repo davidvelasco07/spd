@@ -74,6 +74,7 @@ class Riemann_solver:
         _p_: int,
         gamma: float,
         min_c2: float,
+        npassive: int = 0,
         **kwargs,
     ) -> np.ndarray:
         """
@@ -142,6 +143,9 @@ class Riemann_solver:
         F[_p_] *= 0 if kwargs["isothermal"] else 1
         for vel in vels[1:]:
             F[vel,...] = F[_d_]*np.where(v_star>0,W_L[vel],W_R[vel])
+        if npassive>0:
+            _ps_ = _p_+1
+            F[_ps_:_ps_+npassive,...] = F[_d_]*np.where(v_star>0,W_L[_ps_:_ps_+npassive],W_R[_ps_:_ps_+npassive])
         return F
 
     def lhllc(
@@ -154,6 +158,7 @@ class Riemann_solver:
         _p_: int,
         gamma: float,
         min_c2: float,
+        npassive: int = 0,
         **kwargs,
     ) -> np.ndarray:
         #Density index
@@ -210,4 +215,7 @@ class Riemann_solver:
         F[_p_] *= 0 if kwargs["isothermal"] else 1
         for vel in vels[1:]:
             F[vel,...] = F[_d_]*np.where(v_star>0,W_L[vel],W_R[vel])
+        if npassive>0:
+            _ps_ = _p_+1
+            F[_ps_:_ps_+npassive,...] = F[_d_]*np.where(v_star>0,W_L[_ps_:_ps_+npassive],W_R[_ps_:_ps_+npassive])
         return F
