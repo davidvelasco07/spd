@@ -183,8 +183,8 @@ class FV_Simulator(Simulator):
                   dt: float,
                   **kwargs)->None:
         self.fv_scheme(self,F,dt,**kwargs)
-        if self.viscosity:
-            muscl.compute_viscosity(self,F)
+        if self.viscosity or self.thdiffusion:
+            muscl.compute_nabla_terms(self,F)
 
     def fv_apply_fluxes(self,dt):
         dUdt = self.dm.U_cv.copy()*0

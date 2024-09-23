@@ -236,13 +236,17 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
                 #F->F'
                 self.F_ader_fp[dim]-=self.dm.__getattribute__(f"F_eq_fp_{dim}")[:,na]
         
-        if self.viscosity:
-            self.add_viscosity()
+        if self.viscosity or self.thdiffusion:
+            self.add_nabla_terms()
 
     def compute_gradient(self,M_fp,dim):
         return self.compute_sp_from_dfp(M_fp,dim,ader=True)/self.h[dim]
     
-    def add_viscosity(self,):
+    def add_nabla_terms(self,):
+        """
+        This routine adds terms involving second order derivatives in space,
+        such as viscosity and thermal diffusion.
+        """
         dW_sp = {}
         for dim in self.dims:
             idim = self.dims[dim]
@@ -257,7 +261,8 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         for dim in self.dims:
             idim = self.dims[dim]
             vels = np.roll(self.vels,-idim)
-            for idim in self.idims:
+            idims = self.idims if self.viscosity else [idim]
+            for idim in idims:
                 #Interpolate gradients(all directions) to flux points at dim
                 dW_fp[idim] = self.compute_fp_from_sp(dW_sp[idim],dim,ader=True)
                 bc.Boundaries_sd(self,dW_fp[idim],dim)
@@ -266,7 +271,10 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
                 bc.apply_interfaces(self,dW,dW_fp[idim],dim)
             #Add viscous flux
             self.F_ader_fp[dim][...] -= self.compute_viscous_fluxes(self.M_ader_fp[dim],dW_fp,vels,prims=True)
-    
+            if self.thdiffusion:
+                #Add thermal flux
+                self.F_ader_fp[dim][...] -= self.compute_thermal_fluxes(self.M_ader_fp[dim],dW_fp[self.dims[dim]],prims=True)
+
     ####################
     ## Finite volume
     ####################

@@ -22,11 +22,14 @@ class Simulator:
         gamma: float = 1.4,
         beta: float = 2./3,
         nu: float = 1e-4,
+        chi: float = 1e-4,
         cfl_coeff: float = 0.8,
         min_c2: float = 1E-10,
         isothermal: bool = False,
         viscosity: bool = False,
+        thdiffusion: bool = False,
         potential: bool = False,
+        passives: list = [],
         WB: bool = False,
         use_cupy: bool = True,
         BC: Tuple = (("periodic","periodic"),
@@ -69,10 +72,12 @@ class Simulator:
         self.gamma=gamma
         self.beta=beta
         self.nu=nu
+        self.chi=chi
         self.cfl_coeff = cfl_coeff
         self.min_c2 = min_c2
         self.isothermal = isothermal
         self.viscosity = viscosity
+        self.thdiffusion = thdiffusion
         self.potential = potential
         self.WB = WB
         self.verbose = verbose
@@ -112,6 +117,16 @@ class Simulator:
         self.variables.append("P")
         self._p_  = self.ndim+1
         self.nvar = self.ndim+2
+        self.npassive = len(passives)
+        for i in range(self.npassive):
+            self.variables.append(passives[i])
+        self.nvar += self.npassive
+        if self.thdiffusion:
+            self._t_ = self.nvar
+            self.nvar += 1
+            self.variables.append("T")
+        else:
+            self._t_ = None
 
         for dim in self.dims:
             n=self.comms.__getattribute__(f"n{dim}")
@@ -162,6 +177,8 @@ class Simulator:
                 self._p_,
                 self.gamma,
                 isothermal=self.isothermal,
+                thdiffusion=self.thdiffusion,
+                _t_=self._t_,
                 **kwargs)
                 
     def compute_conservatives(self,W,**kwargs)->np.ndarray:
@@ -171,6 +188,8 @@ class Simulator:
                 self._p_,
                 self.gamma,
                 isothermal=self.isothermal,
+                thdiffusion=self.thdiffusion,
+                _t_=self._t_,
                 **kwargs)
     
     def compute_fluxes(self,F,M,vels,prims)->np.ndarray:
@@ -193,6 +212,13 @@ class Simulator:
         else:
             W = self.compute_primitives(M)
         return hydro.compute_viscous_fluxes(W,vels,dMs,self._p_,self.nu,self.beta)
+    
+    def compute_thermal_fluxes(self,M,dMs,prims=False)->np.ndarray:
+        if prims:
+            W = M
+        else:
+            W = self.compute_primitives(M)
+        return hydro.compute_thermal_fluxes(W,dMs,self.chi,self._t_)
 
     def apply_potential(self,dUdt,U,grad_phi):
         _p_ = self._p_

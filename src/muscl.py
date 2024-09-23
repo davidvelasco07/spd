@@ -94,7 +94,7 @@ class Slope_limiter:
         -------
             S:          Slopes of M
         """
-        dMh = self.compute_gradient(M,h_cv,h_fp,idim)
+        dMh = self.compute_gradients(M,h_cv,h_fp,idim)
         return 0.5*dMh*h_fp[cut(1,-1,idim)] 
     
 def MUSCL_fluxes(self: Simulator,
@@ -220,7 +220,7 @@ def MUSCL_Hancock_fluxes(self: Simulator,
         self.ML_faces[dim][...] = self.interpolate_L(self.dm.M_fv,S[idim],idim)
         self.solve_riemann_problem(dim,F[dim],prims)
     
-def compute_viscosity(self: Simulator,
+def compute_nabla_terms(self: Simulator,
                       F: dict,)->None:
     """
     Parameters
@@ -247,7 +247,8 @@ def compute_viscosity(self: Simulator,
         shift = self.dims[dim]
         vels = np.roll(self.vels,-shift)
         #Interpolate gradients(all) to faces at dim
-        for idim in self.idims:
+        idims = self.idims if self.viscosity else [idim]
+        for idim in idims:
             self.fill_active_region(dW[idim])
             self.fv_Boundaries(self.dm.M_fv,all=False)    
             S = self.compute_slopes(self.dm.M_fv,shift)
@@ -255,4 +256,6 @@ def compute_viscosity(self: Simulator,
             dW_f[idim] = self.interpolate_R(self.dm.M_fv,S,shift)
         #Add viscous flux
         F[dim][...] -= self.compute_viscous_fluxes(self.ML_faces[dim],dW_f,vels,prims=True)
-        
+        if self.thdiffusion:
+            #Add thermal flux
+            F[dim][...] -= self.compute_thermal_fluxes(self.ML_faces[dim],dW_f[self.dims[dim]],prims=True)
