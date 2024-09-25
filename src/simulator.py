@@ -214,7 +214,13 @@ class Simulator:
             W = M
         else:
             W = self.compute_primitives(M)
-        return hydro.compute_viscous_fluxes(W,vels,dMs,self._p_,self.nu,self.beta)
+        return hydro.compute_viscous_fluxes(W,
+                                            vels,
+                                            dMs,
+                                            self._p_,
+                                            self.nu,
+                                            self.beta,
+                                            npassive=self.npassive)
     
     def compute_thermal_fluxes(self,M,dMs,prims=False)->np.ndarray:
         if prims:
