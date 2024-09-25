@@ -79,7 +79,8 @@ def compute_primitives(
     if type(W)==type(None):
         W = U.copy()
     assert W.shape == U.shape
-    K = W[_d_].copy()*0
+    K = W[_p_]
+    K *= 0
     for vel in vels:
         W[vel] = U[vel]/U[_d_]
         K += W[vel]**2
@@ -126,11 +127,12 @@ def compute_conservatives(
     if type(U)==type(None):
         U = W.copy()
     assert U.shape == W.shape
-    K = W[0].copy()*0
+    K = U[_p_]
+    K *= 0
     for vel in vels:
         U[vel] = W[vel]*U[_d_]
         K += W[vel]**2
-    K  *= 0.5*U[_d_]
+    K *= 0.5*U[_d_]
     K *= 0 if isothermal else 1
     U[_p_] = W[_p_]/(gamma-1)+K
     if thdiffusion:
@@ -169,7 +171,8 @@ def compute_fluxes(
     """
     if type(F)==type(None):
         F = W.copy()
-    K = W[_d_].copy()*0
+    K = F[_p_]
+    K *= 0
     v1=vels[0]
     for v in vels[::-1]:
         #Iterate over inverted array of vels
@@ -192,12 +195,13 @@ def compute_fluxes(
 def compute_viscous_fluxes(
         W: np.ndarray,
         vels: np.array,
-        dUs: dict,
+        dWs: dict,
         _p_: int,
         nu: float,
         beta: float,
         _d_: int=0,
-        F=None)->np.ndarray:
+        F=None,
+        npassive=0)->np.ndarray:
     """
     Returns array of viscous fluxes for conservative variables
 
@@ -207,8 +211,8 @@ def compute_viscous_fluxes(
     vels:   array containing the indices of velocity components [vx,vy,vz]
             in the Solution array. The size of this array has to match the
             number of dimensions
-    dUs:    Dictionary with references to arrays containing the gradient of
-            the conservative variables along a given dimension
+    dWs:    Dictionary with references to arrays containing the gradient of
+            the primitive variables along a given dimension
     _p_:    index of pressure/energy in the Solution array
     nu:     Viscous coefficient
     beta:   ------
@@ -247,17 +251,20 @@ def compute_viscous_fluxes(
     #index of normal component
     v1  = vels[0]
     #Gradient in normal dimension
-    dU1 = dUs[v1-1]
+    dW1 = dWs[v1-1]
     #Flux is normal dimension
-    F[v1] = 2*dU1[v1] - beta*dU1[v1]
+    F[v1] = 2*dW1[v1] - beta*dW1[v1]
     #Energy flux
     F[_p_] = W[v1]*F[v1]
     for vel in vels[1:]:
         idim = vel-1
-        dU = dUs[idim]
-        F[v1]  -= beta*dU[vel]
-        F[vel]  = (dU1[vel]+dU[v1])
+        dW = dWs[idim]
+        F[v1]  -= beta*dW[vel]
+        F[vel]  = (dW1[vel]+dW[v1])
         F[_p_] += W[vel]*F[vel]
+    if npassive>0:
+        _ps_ = _p_+1
+        F[_ps_:_ps_+npassive] = dW1[_ps_:_ps_+npassive]
     return F*W[_d_]*nu
 
 def compute_thermal_fluxes(
