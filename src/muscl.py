@@ -124,7 +124,7 @@ def MUSCL_fluxes(self: Simulator,
         
         self.MR_faces[dim][...] = self.interpolate_R(self.dm.M_fv,S,idim)
         self.ML_faces[dim][...] = self.interpolate_L(self.dm.M_fv,S,idim)
-        self.solve_riemann_problem(dim,F[dim],prims)
+        self.solve_riemann_problem_fv(dim,F[dim],prims)
     
 def compute_prediction(W: np.ndarray,
                        dWs: np.ndarray,
@@ -136,6 +136,7 @@ def compute_prediction(W: np.ndarray,
                        _p_: int,
                        WB: bool,
                        isothermal: bool,
+                       npassive: int = 0,
                        )->None:
     """
     Returns the prediction for conserved variales
@@ -163,14 +164,17 @@ def compute_prediction(W: np.ndarray,
         dW = dWs[idim]
         dtW[_d_] -= (W[vel]*dW[_d_] +       W[_d_]*dW[vel])
         dtW[_p_] -= (W[vel]*dW[_p_] + gamma*W[_p_]*dW[vel])
-        dtW[vel] -= (W[vel]*dW[vel]+ dW[_p_]/W[_d_])
+        dtW[vel] -= (W[vel]*dW[vel] + dW[_p_]/W[_d_])
         if WB:
             dW = dWs[idim+ndim]
             dtW[_d_] -= (W[vel]*dW[_d_]) 
             dtW[_p_] -= (W[vel]*dW[_p_])
-        for vel2 in vels[1:]:
+        for vel2 in np.roll(vels,idim)[1:]:
             dtW[vel2] -= W[vel]*dW[vel2]
-    dtW[_p_] *= 0 if isothermal else 0
+        if npassive>0:
+            _ps_ = _p_+1
+            dtW[_ps_:_ps_+npassive] -= W[vel]*dW[_ps_:_ps_+npassive]
+    dtW[_p_] *= 0 if isothermal else 1
 
 def MUSCL_Hancock_fluxes(self: Simulator,
                          F: dict,
@@ -195,13 +199,13 @@ def MUSCL_Hancock_fluxes(self: Simulator,
     crop = lambda start,end,idim : crop_fv(start,end,idim,self.ndim,1)
     for dim in self.dims:
         idim=self.dims[dim]
-        dMh = self.compute_gradients(self.dm.M_fv,idim)
+        dMh = self.compute_gradients_fv(self.dm.M_fv,idim)
         #Compute and store slopes in a dictionary
         S[idim] = 0.5*dMh*self.h_fp[dim][cut(1,-1,idim)]
         #Store gradients in a dictionary
         dMhs[idim] = dMh[crop(None,None,idim)]
         if self.WB:
-            dMhs[idim+self.ndim] = self.compute_gradients(self.dm.M_eq_fv,idim)[crop(None,None,idim)]
+            dMhs[idim+self.ndim] = self.compute_gradients_fv(self.dm.M_eq_fv,idim)[crop(None,None,idim)]
     if self.WB:
         self.dm.M_fv += self.dm.M_eq_fv                    
     self.compute_prediction(self.dm.M_fv[crop(1,-1,0)],dMhs)
@@ -218,7 +222,7 @@ def MUSCL_Hancock_fluxes(self: Simulator,
         idim=self.dims[dim]
         self.MR_faces[dim][...] = self.interpolate_R(self.dm.M_fv,S[idim],idim)
         self.ML_faces[dim][...] = self.interpolate_L(self.dm.M_fv,S[idim],idim)
-        self.solve_riemann_problem(dim,F[dim],prims)
+        self.solve_riemann_problem_fv(dim,F[dim],prims)
     
 def compute_nabla_terms(self: Simulator,
                       F: dict,)->None:
