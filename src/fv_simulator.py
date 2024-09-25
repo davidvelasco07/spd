@@ -76,7 +76,7 @@ class FV_Simulator(Simulator):
                            self.h_fp[self.idims[idim]],
                            idim)
     
-    def compute_gradients(self,
+    def compute_gradients_fv(self,
                        M: np.ndarray,
                        idim: int,
                        )->np.ndarray: 
@@ -99,7 +99,7 @@ class FV_Simulator(Simulator):
         #MR = M - SlopeC*h/2
         ngh=self.Nghc
         crop = lambda start,end,idim : crop_fv(start,end,idim,self.ndim,ngh)
-        return M[crop(ngh,-1,idim)] - S[crop( 1,None,idim)]
+        return M[crop(2,-1,idim) ] - S[crop( 1,None,idim)]
 
     def interpolate_L(self,
                       M: np.ndarray,
@@ -111,13 +111,13 @@ class FV_Simulator(Simulator):
             M:      Solution vector (conservatives/primitives)
             idim:   index of dimension
         returns:
-            MR:     Values interpolated to the left
+            ML:     Values interpolated to the left
         """
         #ML = M + SlopeC*h/2
         ngh=self.Nghc
         crop = lambda start,end,idim : crop_fv(start,end,idim,self.ndim,ngh)
-        return M[crop(1,-ngh,idim)] + S[crop(None,-1,idim)]  
-    
+        return M[crop(1,-2,idim)] + S[crop(None,-1,idim)]
+
     def compute_prediction(self,
                            W: np.ndarray,
                            dWs: np.ndarray)->None:
@@ -130,9 +130,10 @@ class FV_Simulator(Simulator):
                                  self._d_,
                                  self._p_,
                                  self.WB,
-                                 self.isothermal)
+                                 self.isothermal,
+                                 self.npassive)
 
-    def solve_riemann_problem(self,
+    def solve_riemann_problem_fv(self,
                               dim: str,
                               F: np.ndarray,
                               prims: bool)->None:
@@ -190,13 +191,11 @@ class FV_Simulator(Simulator):
     def fv_apply_fluxes(self,dt):
         dUdt = self.dm.U_cv.copy()*0
         for dim in self.dims:
-            ndim = self.ndim
             ngh = self.ngh[dim]
             shift=self.dims[dim]
-            dx = self.faces[dim][ngh+1:-ngh] - self.faces[dim][ngh:-(ngh+1)]
-            dx = dx[(None,)*(ndim-shift)+(slice(None),)+(None,)*(shift)]
+            h = self.h_fp[dim][cut(ngh,-ngh,shift)] 
             dUdt += (self.F_faces[dim][cut(1,None,shift)]
-                             -self.F_faces[dim][cut(None,-1,shift)])/dx
+                             -self.F_faces[dim][cut(None,-1,shift)])/h
             
         if self.potential:
             self.apply_potential(dUdt,
