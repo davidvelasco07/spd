@@ -80,12 +80,11 @@ def compute_primitives(
         W = U.copy()
     assert W.shape == U.shape
     K = W[_p_]
-    K *= 0
+    K[...] = 0
     for vel in vels:
         W[vel] = U[vel]/U[_d_]
         K += W[vel]**2
     K *= 0.5*U[0]
-    K *= 0 if isothermal else 1
     W[_p_] = (gamma-1)*(U[_p_]-K)
     if thdiffusion:
         W[_t_] = W[_p_]/W[_d_]
@@ -128,12 +127,11 @@ def compute_conservatives(
         U = W.copy()
     assert U.shape == W.shape
     K = U[_p_]
-    K *= 0
+    K[...] = 0
     for vel in vels:
         U[vel] = W[vel]*U[_d_]
         K += W[vel]**2
     K *= 0.5*U[_d_]
-    K *= 0 if isothermal else 1
     U[_p_] = W[_p_]/(gamma-1)+K
     if thdiffusion:
         U[_t_] = W[_p_]/W[_d_]
@@ -172,7 +170,7 @@ def compute_fluxes(
     if type(F)==type(None):
         F = W.copy()
     K = F[_p_]
-    K *= 0
+    K[...] = 0
     v1=vels[0]
     for v in vels[::-1]:
         #Iterate over inverted array of vels
@@ -186,7 +184,6 @@ def compute_fluxes(
     F[0  ,...] = m
     F[v1,...] = m*W[v1] + W[_p_]
     F[_p_,...] = W[v1]*(E + W[_p_])
-    F[_p_,...] *= 0 if isothermal else 1
     if npassive>0:
         _ps_ = _p_+1
         F[_ps_:_ps_+npassive,...] = m*W[_ps_:_ps_+npassive]
