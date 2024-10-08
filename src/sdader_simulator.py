@@ -23,6 +23,7 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
                  max_rho: float = 1e10,
                  min_P: float = 1e-10,
                  godunov: bool = False,
+                 limiting_variables: list = [0],
                  *args,
                  **kwargs):
         super().__init__(*args, **kwargs)
@@ -36,6 +37,7 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         self.max_rho = max_rho
         self.min_P = min_P
         self.godunov = godunov
+        self.limiting_variables = limiting_variables
 
         # ADER matrix.
         self.dm.x_tp, self.dm.w_tp = gauss_legendre_quadrature(0.0, 1.0, self.m + 1)

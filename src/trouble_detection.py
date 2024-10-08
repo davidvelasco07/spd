@@ -53,8 +53,7 @@ def detect_troubles(self: Simulator):
         possible_trouble *= np.where(alpha<1, 1, 0)
 
     self.dm.troubles[...] = np.amax(possible_trouble[self.limiting_variables],axis=0)
-    #self.dm.troubles[...] = np.maximum(possible_trouble[self._d_],possible_trouble[self._p_])
-    #self.dm.possible_troubles = possible_trouble
+    
     ###########################
     # PAD Check for physically admissible values
     ###########################
