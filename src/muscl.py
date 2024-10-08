@@ -165,16 +165,15 @@ def compute_prediction(W: np.ndarray,
         dtW[_d_] -= (W[vel]*dW[_d_] +       W[_d_]*dW[vel])
         dtW[_p_] -= (W[vel]*dW[_p_] + gamma*W[_p_]*dW[vel])
         dtW[vel] -= (W[vel]*dW[vel] + dW[_p_]/W[_d_])
-        if WB:
-            dW = dWs[idim+ndim]
-            dtW[_d_] -= (W[vel]*dW[_d_]) 
-            dtW[_p_] -= (W[vel]*dW[_p_])
-        for vel2 in np.roll(vels,idim)[1:]:
+        for vel2 in np.roll(vels,-idim)[1:]:
             dtW[vel2] -= W[vel]*dW[vel2]
         if npassive>0:
             _ps_ = _p_+1
             dtW[_ps_:_ps_+npassive] -= W[vel]*dW[_ps_:_ps_+npassive]
-    dtW[_p_] *= 0 if isothermal else 1
+        if WB:
+            dW = dWs[idim+ndim]
+            dtW[_d_] -= (W[vel]*dW[_d_]) 
+            dtW[_p_] -= (W[vel]*dW[_p_])
 
 def MUSCL_Hancock_fluxes(self: Simulator,
                          F: dict,
