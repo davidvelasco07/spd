@@ -3,6 +3,9 @@ from simulator import Simulator
 from slicing import cut, crop_fv
 
 def detect_troubles(self: Simulator):
+    if self.godunov:
+        return
+
     # Reset to check troubled control volumes
     ngh=self.Nghc
     crop = lambda start,end,idim : crop_fv(start,end,idim,self.ndim,ngh)
@@ -49,8 +52,8 @@ def detect_troubles(self: Simulator):
 
         possible_trouble *= np.where(alpha<1, 1, 0)
 
-    #self.dm.troubles[...] = np.amax(possible_trouble,axis=0)
-    self.dm.troubles[...] = np.maximum(possible_trouble[self._d_],possible_trouble[self._p_])
+    self.dm.troubles[...] = np.amax(possible_trouble[self.limiting_variables],axis=0)
+    #self.dm.troubles[...] = np.maximum(possible_trouble[self._d_],possible_trouble[self._p_])
     #self.dm.possible_troubles = possible_trouble
     ###########################
     # PAD Check for physically admissible values
