@@ -1,6 +1,5 @@
 import numpy as np
-
-from collections import defaultdict
+import os
 
 from simulator import Simulator
 from polynomials import gauss_legendre_quadrature
@@ -21,10 +20,13 @@ class SD_Simulator(Simulator):
         self,
         riemann_solver_sd: str = "llf",
         update: str = "SD",
+        folder: str = "outputs/",
         *args,
         **kwargs
     ):
         super().__init__(*args, **kwargs)
+        self.folder =  folder
+        self.noutput = 0
         self.riemann_solver_sd = rs.Riemann_solver(riemann_solver_sd).solver
         self.update = update
         self.x, self.w = gauss_legendre_quadrature(0.0, 1.0, self.p)
@@ -32,7 +34,7 @@ class SD_Simulator(Simulator):
         fp = flux_points(0.0, 1.0, self.p)
         
         for name in ["sp","fp","n"]:
-            self.__setattr__(name,defaultdict(list))
+            self.__setattr__(name,{})
         for dim in self.dims:    
             self.__setattr__(f"{dim}_sp",sp)
             self.sp[dim] = self.__getattribute__(f"{dim}_sp")
@@ -236,4 +238,11 @@ class SD_Simulator(Simulator):
                        self.dims[dim],
                        dim,
                        self.Nghc)
-
+            
+    def output(self):
+        folder = self.folder
+        if not os.path.exists(folder):
+            os.makedirs(folder)
+        np.save(f"{folder}/Output_{str(self.noutput).zfill(5)}",self.dm.W_cv)
+        self.noutput+=1
+        
