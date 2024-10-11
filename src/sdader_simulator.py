@@ -384,7 +384,7 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
             #U' -> U
             self.dm.U_sp[...] += self.dm.U_eq_sp
             self.dm.U_cv[...] += self.dm.U_eq_cv
-        self.dm.W_cv[...] = self.compute_primitives(self.dm.U_cv)
+        self.compute_primitives(self.dm.U_cv,W=self.dm.W_cv)
         self.time += self.dm.dt
         return True
 
