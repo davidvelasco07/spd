@@ -7,8 +7,9 @@ import numpy as np
 from slicing import indices2,cuts
 
 class CommHelper():
-    def __init__(self,ndim):
+    def __init__(self,ndim,CUDA_AWARE=True):
         self.ndim = ndim
+        self.CUDA_AWARE = CUDA_AWARE
         if MPI_AVAILABLE:
             self.comm = MPI.COMM_WORLD
             self.size = self.comm.Get_size()
@@ -66,10 +67,8 @@ class CommHelper():
             rank_dim = self.__getattribute__(dim) 
             Buffers={}
             for side in [0,1]:
-                Buffer = M[function(-side,ndim,idim,ngh=ngh)]
+                Buffers[side] = M[function(-side,ndim,idim,ngh=ngh)]
                 #print(rank, dim, side, Buffer.shape, BC[dim][side].shape)
-                Buffer = dm.asnumpy(Buffer).flatten()
-                Buffers[side] = Buffer
     
             neighbour = self.left[idim] if rank%2 else self.right[idim]
             side = rank_dim%2
@@ -84,5 +83,14 @@ class CommHelper():
     def send_recv(self, dm, neighbour, BC, Buffer, side):
         rank = self.rank
         if neighbour != rank:
-            self.send_recv_replace(Buffer,neighbour,side)
-            BC[...] = dm.xp.asarray(Buffer).reshape(BC.shape)
+            if not(self.CUDA_AWARE):
+                Buffer = dm.xp.asnumpy(Buffer)
+            self.send_recv_replace(Buffer.flatten(),neighbour,side)
+            Buffer = Buffer.reshape(BC.shape)
+            if not(self.CUDA_AWARE):
+                Buffer = dm.xp.asarray(Buffer) 
+            BC[...] = Buffer
+            
+    def barrier(self):
+        if self.size>1:
+            self.comm.Barrier()
