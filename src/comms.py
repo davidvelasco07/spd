@@ -41,7 +41,7 @@ class CommHelper():
         for dim in range(ndim):
             self.left[dim]  = np.roll(mesh,+1,axis=2-dim)[self.z,self.y,self.x]
             self.right[dim] = np.roll(mesh,-1,axis=2-dim)[self.z,self.y,self.x]
-
+        #print(f"{self.rank} left {self.left} right {self.right}")
         self.Comms_fv = self.Comms(cuts)
         self.Comms_sd = self.Comms(indices2)
     
@@ -65,16 +65,16 @@ class CommHelper():
              dim: str,
              ngh: int=0):
             rank_dim = self.__getattribute__(dim) 
+
             Buffers={}
             for side in [0,1]:
-                Buffers[side] = M[function(-side,ndim,idim,ngh=ngh)]
-                #print(rank, dim, side, Buffer.shape, BC[dim][side].shape)
+                Buffers[side] = M[function(-side,ndim,idim,ngh=ngh)].flatten()
     
-            neighbour = self.left[idim] if rank%2 else self.right[idim]
+            neighbour = self.right[idim] if rank_dim%2 else self.left[idim]
             side = rank_dim%2
             self.send_recv(dm, neighbour, BC[dim][side], Buffers[side], side)
         
-            neighbour = self.right[idim] if rank%2 else self.left[idim]
+            neighbour = self.left[idim] if rank_dim%2 else self.right[idim]
             side = 1-rank_dim%2
             self.send_recv(dm, neighbour, BC[dim][side], Buffers[side], side)
     
@@ -85,7 +85,7 @@ class CommHelper():
         if neighbour != rank:
             if not(self.CUDA_AWARE):
                 Buffer = dm.xp.asnumpy(Buffer)
-            self.send_recv_replace(Buffer.flatten(),neighbour,side)
+            self.send_recv_replace(Buffer,neighbour,side)
             Buffer = Buffer.reshape(BC.shape)
             if not(self.CUDA_AWARE):
                 Buffer = dm.xp.asarray(Buffer) 
