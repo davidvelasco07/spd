@@ -41,7 +41,7 @@ def detect_troubles(self: Simulator):
     possible_trouble = np.where(W_new <= W_max, possible_trouble, 1)
        
     # Now check for smooth extrema and relax the criteria for such cases
-    if np.any(possible_trouble) and self.p > 1 and self.SED:
+    if self.p > 1 and self.SED:
         self.fill_active_region(W_new)
         self.fv_Boundaries(self.dm.M_fv)
         alpha = W_new*0 + 1

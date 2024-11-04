@@ -54,8 +54,7 @@ class CommHelper():
         else:
             return M
         
-    def Comms(self, function):
-        rank = self.rank  
+    def Comms(self, function): 
         ndim = self.ndim
         def communicate(
              dm,
@@ -77,7 +76,8 @@ class CommHelper():
             neighbour = self.left[idim] if rank_dim%2 else self.right[idim]
             side = 1-rank_dim%2
             self.send_recv(dm, neighbour, BC[dim][side], Buffers[side], side)
-    
+
+            self.barrier()    
         return communicate
 
     def send_recv(self, dm, neighbour, BC, Buffer, side):

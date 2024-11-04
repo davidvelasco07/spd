@@ -227,6 +227,7 @@ class SD_Simulator(Simulator):
         
         dt = self.comms.reduce_min(dt)
         self.dm.dt = self.cfl_coeff*dt
+        self.dt = self.dm.dt.item()
 
     def Comms_fp(self,
              M: np.ndarray,
@@ -241,8 +242,32 @@ class SD_Simulator(Simulator):
             
     def output(self):
         folder = self.folder
-        if not os.path.exists(folder):
+        if not os.path.exists(folder) and self.rank==0:
             os.makedirs(folder)
-        np.save(f"{folder}/Output_{str(self.noutput).zfill(5)}",self.dm.W_cv)
+            
+        self.comms.barrier()
+
+        file = f"{folder}/Output_{str(self.noutput).zfill(5)}"
+        if self.comms.size>1:
+            file += f"_{self.comms.rank}"
+        np.save(file,self.dm.W_cv)
+        self.outputs.append([self.time,self.noutput])
+        if self.rank==0:
+            np.savetxt(folder+"/outputs.out",self.outputs)
+        self.noutput+=1
+    
+    def load_output(self):
+        folder = self.folder
+        outputs = np.loadtxt(folder+"/outputs.out")
+        rows = int(outputs.size//2)
+        self.outputs = list(outputs.reshape([rows,2]))
+        self.time,self.noutput = self.outputs[-1]
+        self.noutput = int(self.noutput)
+        file = f"{folder}/Output_{str(self.noutput).zfill(5)}"
+        if self.comms.size>1:
+            file += f"_{self.comms.rank}"
+        self.dm.W_cv = np.load(file+".npy")
+        self.dm.U_cv = self.compute_conservatives(self.dm.W_cv)
+        self.dm.U_sp = self.compute_sp_from_cv(self.dm.U_cv)
         self.noutput+=1
         

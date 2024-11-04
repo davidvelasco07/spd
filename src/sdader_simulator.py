@@ -385,7 +385,7 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
             self.dm.U_sp[...] += self.dm.U_eq_sp
             self.dm.U_cv[...] += self.dm.U_eq_cv
         self.compute_primitives(self.dm.U_cv,W=self.dm.W_cv)
-        self.time += self.dm.dt
+        self.time += self.dt
         return True
 
     def init_sim(self):
@@ -415,10 +415,10 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
             if not self.n_step % 100 and self.rank==0 and self.verbose:
                 print(f"Time step #{self.n_step} (t = {self.time})",end="\r")
             self.compute_dt()   
-            if(self.time + self.dm.dt >= t_end):
-                self.dm.dt = t_end-self.time
-            if(self.dm.dt < 1E-14):
-                print(f"dt={self.dm.dt}")
+            if(self.time + self.dt >= t_end):
+                self.dt = t_end-self.time
+            if(self.dt < 1E-14):
+                print(f"dt={self.dt}")
                 break
             self.status = self.perform_update()
         self.end_sim()          

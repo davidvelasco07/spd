@@ -84,6 +84,7 @@ class Simulator:
         self.comms = CommHelper(self.ndim)
         self.use_cupy = use_cupy 
         self.dm = GPUDataManager(use_cupy)
+        self.outputs = []
 
         self.nghx = Nghc
         self.nghy = (0,Nghc) [self.Y]
