@@ -46,10 +46,9 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         self.dm.invader = np.einsum("p,np->np",self.dm.w_tp,self.dm.invader)
         #number of time slices
         self.nader = self.m+1
-
-        self.ader_arrays()
-        self.compute_positions()
-        self.init_sd_Boundaries()
+        if not(self.godunov):
+            self.ader_arrays()
+            self.init_sd_Boundaries()
         if self.update=="FV":
             self.fv_arrays()
             if FB:
@@ -59,39 +58,6 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
             self.init_potential()
         if self.WB:
             self.init_equilibrium_state()
-
-    def compute_positions(self):
-        na = np.newaxis
-        ngh=self.Nghc
-        self.faces = {}
-        self.centers = {}
-        self.h_fp = {}
-        self.h_cv = {}
-        for dim in self.dims:
-            idim = self.dims[dim]
-            #Solution points
-            sp = self.lim[dim][0] + (np.arange(self.N[dim])[:,na] + self.sp[dim][na,:])*self.h[dim]
-            self.dm.__setattr__(f"{dim.upper()}_sp",sp.reshape(self.N[dim],self.n[dim]))
-            #Flux points
-            fp = np.ndarray((self.N[dim] * self.n[dim] + ngh*2+1))
-            fp[ngh :-ngh] = (self.h[dim]*np.hstack((np.arange(self.N[dim]).repeat(self.n[dim]) + 
-             np.tile(self.fp[dim][:-1],self.N[dim]),self.N[dim])))
-            fp[ :ngh] = -fp[(ngh+1):(2*ngh+1)][::-1]
-            fp[-ngh:] =  fp[-(ngh+1)] + fp[ngh+1:2*ngh+1]
-            self.dm.__setattr__(f"{dim.upper()}_fp",fp)
-            self.faces[dim] = fp
-            #Cell centers 
-            cv = 0.5*(fp[1:]+fp[:-1])
-            self.dm.__setattr__(f"{dim.upper()}_cv",cv)
-            self.centers[dim] = cv
-            #Distance between faces
-            h_fp = (fp[1:]-fp[:-1])[self.shape(idim)]
-            self.dm.__setattr__(f"d{dim}_fp",h_fp)
-            self.h_fp[dim] = h_fp
-            #Distance between centers
-            h_cv = (cv[1:]-cv[:-1])[self.shape(idim)]
-            self.dm.__setattr__(f"d{dim}_cv",h_cv)
-            self.h_cv[dim] = h_cv
 
     def ader_arrays(self):
         """
@@ -125,11 +91,12 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         integration. It enables writting generic functions for all
         dimensions.
         """
-        names = ["M_ader_fp","F_ader_fp","MR_fp","ML_fp","BC_fp"]
-        for name in names:
-            self.__setattr__(name,{})
-            for dim in self.dims:
-                self.__getattribute__(name)[dim] = self.dm.__getattribute__(f"{name}_{dim}")
+        if not(self.godunov):
+            names = ["M_ader_fp","F_ader_fp","MR_fp","ML_fp","BC_fp"]
+            for name in names:
+                self.__setattr__(name,{})
+                for dim in self.dims:
+                    self.__getattribute__(name)[dim] = self.dm.__getattribute__(f"{name}_{dim}")
 
         if self.update=="FV":
             self.create_dicts_fv()
@@ -227,6 +194,7 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
             bc.Boundaries_sd(self,self.M_ader_fp[dim],dim)
             F = self.riemann_solver_sd(self.ML_fp[dim],
                                        self.MR_fp[dim],
+                                       self.MR_fp[dim],
                                        vels,
                                        self._p_,
                                        self.gamma,
@@ -304,9 +272,9 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         self.dm.W_cv = self.transpose_to_fv(self.dm.W_cv)
         if self.WB:
             self.dm.U_eq_cv = self.transpose_to_fv(self.dm.U_eq_cv)
-        
-        for dim in self.dims:
-            self.F_ader_fp[dim][...] = self.integrate_faces(self.F_ader_fp[dim],dim)
+        if not(self.godunov):
+            for dim in self.dims:
+                self.F_ader_fp[dim][...] = self.integrate_faces(self.F_ader_fp[dim],dim)
 
     def switch_to_high_order(self):
         #Change back to High-Order scheme
@@ -346,7 +314,8 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         for i_ader in range(self.nader):
             self.dm.W_cv[...] = self.compute_primitives_cv(self.dm.U_cv)
             dt = self.dm.dt*self.dm.w_tp[i_ader]
-            self.store_high_order_fluxes(i_ader)
+            if not(self.godunov):
+                self.store_high_order_fluxes(i_ader)
             #Compute candidate solution
             self.fv_apply_fluxes(dt)
             if self.FB:
@@ -374,9 +343,9 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         if self.WB:
             #U -> U'
             self.dm.U_sp -= self.dm.U_eq_sp
-        #if not(self.godunov):
-        self.ader_predictor()
-        if self.update=="SD":
+        if not(self.godunov):
+            self.ader_predictor()
+        elif self.update=="SD":
             self.ader_update()
         else:
             self.fv_update()

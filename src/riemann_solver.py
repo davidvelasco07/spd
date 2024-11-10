@@ -9,6 +9,7 @@ class Riemann_solver:
     def riemann_solver(self,solver):
         def solve(M_L: np.ndarray,
                   M_R: np.ndarray,
+                  F,
                   vels: np.array,
                   _p_: int, 
                   gamma: float,
@@ -25,7 +26,7 @@ class Riemann_solver:
                 U_R = M_R
                 W_L = hydro.compute_primitives(U_L,vels,_p_,gamma,**kwargs)
                 W_R = hydro.compute_primitives(U_R,vels,_p_,gamma,**kwargs)
-            return solver(W_L,W_R,U_L,U_R,vels,_p_,gamma,min_c2,**kwargs)
+            return solver(W_L,W_R,U_L,U_R,F,vels,_p_,gamma,min_c2,**kwargs)
         return solve
 
     def llf(
@@ -34,6 +35,7 @@ class Riemann_solver:
         W_R: np.ndarray,
         U_L: np.ndarray,
         U_R: np.ndarray,
+        F,
         vels: np.array,
         _p_: int,
         gamma: float,
@@ -61,8 +63,8 @@ class Riemann_solver:
         c_R = hydro.compute_cs(W_R[_p_],W_R[_d_],gamma,min_c2) + np.abs(W_R[v_1])
 
         c_max = np.where(c_L>c_R,c_L,c_R)[np.newaxis,...]
-
-        return 0.5*(F_R+F_L)-0.5*c_max*(U_R-U_L)
+        F = 0.5*(F_R+F_L)-0.5*c_max*(U_R-U_L)
+        return F
 
     def hllc(
         self,
@@ -70,6 +72,7 @@ class Riemann_solver:
         W_R: np.ndarray,
         U_L: np.ndarray,
         U_R: np.ndarray,
+        F,
         vels: np.array,
         _p_: int,
         gamma: float,
@@ -136,7 +139,7 @@ class Riemann_solver:
                         np.where(v_star>0,e_starL,
                                 np.where(s_R>0,e_starR,U_R[_p_])))
 
-        F = W_L.copy()             
+        #F = W_L.copy()             
         F[_d_,...] = r_gdv*v_gdv
         F[v_1,...] = F[_d_]*v_gdv + P_gdv
         F[_p_,...] = v_gdv*(e_gdv + P_gdv)

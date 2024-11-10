@@ -54,7 +54,7 @@ class SD_Simulator(Simulator):
         self.dm.cv_to_sp = np.linalg.inv(self.dm.sp_to_cv)
 
         self.mesh_cv = self.compute_mesh_cv()
-
+        self.compute_positions()
         self.post_init()
         self.compute_dt()
     
@@ -72,6 +72,56 @@ class SD_Simulator(Simulator):
             shape2 = (None,)*(2*self.ndim-1-idim)+(slice(None),)+(None,)*(idim)
             mesh_cv[idim] = self.lim[dim][0]+(np.arange(N)[shape1]+self.fp[dim][shape2])*lenght/N-h
         return mesh_cv
+
+    def compute_mesh(self,Points) -> np.ndarray:
+        Nghe=self.Nghe
+        Ns = [self.N[dim]+2*Nghe for dim in self.dims]
+        shape = (self.ndim,)+tuple(Ns[::-1])
+        for points in Points[::-1]:
+            shape += (points.size,)
+        mesh = np.ndarray(shape)
+        for dim in self.dims:
+            idim = self.dims[dim]
+            N = Ns[idim]
+            h=self.h[dim]
+            lenght = self.len[dim]+2*Nghe*h
+            shape1 = (None,)*(self.ndim-1-idim)+(slice(None),)+(None,)*(self.ndim+idim)
+            shape2 = (None,)*(2*self.ndim-1-idim)+(slice(None),)+(None,)*(idim)
+            mesh[idim] = self.lim[dim][0]+(np.arange(N)[shape1]+Points[idim][shape2])*lenght/N-h
+        return mesh
+    
+    def compute_positions(self):
+        na = np.newaxis
+        ngh=self.Nghc
+        self.faces = {}
+        self.centers = {}
+        self.h_fp = {}
+        self.h_cv = {}
+        for dim in self.dims:
+            idim = self.dims[dim]
+            #Solution points
+            sp = self.lim[dim][0] + (np.arange(self.N[dim])[:,na] + self.sp[dim][na,:])*self.h[dim]
+            self.dm.__setattr__(f"{dim.upper()}_sp",sp.reshape(self.N[dim],self.n[dim]))
+            #Flux points
+            fp = np.ndarray((self.N[dim] * self.n[dim] + ngh*2+1))
+            fp[ngh :-ngh] = (self.h[dim]*np.hstack((np.arange(self.N[dim]).repeat(self.n[dim]) + 
+             np.tile(self.fp[dim][:-1],self.N[dim]),self.N[dim])))
+            fp[ :ngh] = -fp[(ngh+1):(2*ngh+1)][::-1]
+            fp[-ngh:] =  fp[-(ngh+1)] + fp[ngh+1:2*ngh+1]
+            self.dm.__setattr__(f"{dim.upper()}_fp",fp)
+            self.faces[dim] = fp
+            #Cell centers 
+            cv = 0.5*(fp[1:]+fp[:-1])
+            self.dm.__setattr__(f"{dim.upper()}_cv",cv)
+            self.centers[dim] = cv
+            #Distance between faces
+            h_fp = (fp[1:]-fp[:-1])[self.shape(idim)]
+            self.dm.__setattr__(f"d{dim}_fp",h_fp)
+            self.h_fp[dim] = h_fp
+            #Distance between centers
+            h_cv = (cv[1:]-cv[:-1])[self.shape(idim)]
+            self.dm.__setattr__(f"d{dim}_cv",h_cv)
+            self.h_cv[dim] = h_cv
         
     def post_init(self) -> None:
         na = np.newaxis
@@ -132,8 +182,10 @@ class SD_Simulator(Simulator):
             return np.transpose(M.reshape(shape),
                                 (0, 1,3,5, 2,4,6))
     
-    def array(self,px,py,pz,ngh=0,ader=False) -> np.ndarray:
-        shape = [self.nvar,self.nader] if ader else [self.nvar]
+    def array(self,px,py,pz,ngh=0,ader=False,nvar=None) -> np.ndarray:
+        if type(nvar) == type(None):
+            nvar = self.nvar
+        shape = [nvar,self.nader] if ader else [nvar]
         N = []
         for dim in self.dims:
             N.append(self.N[dim]+2*ngh)
@@ -157,17 +209,26 @@ class SD_Simulator(Simulator):
             (p+1+("z" in dims)),
             **kwargs)
     
-    def array_RS(self,dim="x",ader=False)->np.ndarray:
+    def array_RS(self,dim="x",dim2=None,ader=False)->np.ndarray:
         shape = [self.nvar,self.nader] if ader else [self.nvar]
         N = []
-        for dim2 in self.dims:
-            N.append(self.N[dim2]+(dim2==dim))
+        for odim in self.dims:
+            N.append(self.N[odim]+(odim==dim))
         shape += N[::-1] 
-        for i in range(1,self.ndim):
-            shape += [self.p+1]
+        if self.ndim>2:
+            if (dim2 == "x") or (dim2== "y" and dim=="x"):
+                shape += [self.p+2]
+            else:
+                shape += [self.p+1]
+        if self.ndim>1:
+            if (dim2 == "z") or (dim2== "y" and dim=="z"):
+                shape += [self.p+2]
+            else:
+                shape += [self.p+1]
+            
         return np.ndarray(shape)
     
-    def array_BC(self,dim="x",ader=False)->np.ndarray:
+    def array_BC(self,dim="x",dim2=None,ader=False)->np.ndarray:
         shape = [2,self.nvar,self.nader] if ader else [2,self.nvar]
         if self.Z:
             if dim=="x" or dim=="y":
@@ -177,10 +238,16 @@ class SD_Simulator(Simulator):
                 shape += [self.N["y"]]
         if dim=="y" or dim=="z":
             shape += [self.N["x"]]
-        if self.Z:    
-            shape += [self.p+1]
+        if self.Z:
+            if dim2=="x" or (dim2=="y" and dim=="x"):
+                shape += [self.p+2]
+            else:
+                shape += [self.p+1]
         if self.Y:
-            shape += [self.p+1]
+            if dim2=="z" or (dim2=="y" and dim=="z"):
+                shape += [self.p+2]
+            else:
+                shape += [self.p+1]
         return np.ndarray(shape)
     
     def compute_sp_from_cv(self,M_cv)->np.ndarray:
@@ -188,6 +255,12 @@ class SD_Simulator(Simulator):
         
     def compute_cv_from_sp(self,M_sp)->np.ndarray:
         return compute_A_from_B_full(M_sp,self.dm.sp_to_cv,self.ndim)
+    
+    def compute_cp_from_sp(self,M_sp)->np.ndarray:
+        return compute_A_from_B_full(M_sp,self.dm.sp_to_fp,self.ndim)
+    
+    def compute_sp_from_cp(self,M_cp)->np.ndarray:
+        return compute_A_from_B_full(M_cp,self.dm.fp_to_sp,self.ndim)
     
     def compute_sp_from_fp(self,M_fp,dim,**kwargs) -> np.ndarray:
         return compute_A_from_B(M_fp,self.dm.fp_to_sp,dim,self.ndim,**kwargs)
