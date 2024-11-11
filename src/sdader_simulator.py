@@ -345,7 +345,7 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
             self.dm.U_sp -= self.dm.U_eq_sp
         if not(self.godunov):
             self.ader_predictor()
-        elif self.update=="SD":
+        if self.update=="SD":
             self.ader_update()
         else:
             self.fv_update()

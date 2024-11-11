@@ -155,6 +155,7 @@ class FV_Simulator(Simulator):
             self.ML_faces[dim][...] += M_eq_faces
         F[...] = self.riemann_solver_fv(self.ML_faces[dim],
                                         self.MR_faces[dim],
+                                        F,
                                         vels,
                                         self._p_,
                                         self.gamma,
