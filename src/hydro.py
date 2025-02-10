@@ -53,9 +53,9 @@ def compute_primitives(
         _d_: int = 0,
         _t_=None,
         W=None,
-        isothermal: bool = False,
         thdiffusion: bool = False,
-        npassive=0)->np.ndarray:
+        npassive=0,
+        **kwargs)->np.ndarray:
     """
     Transforms array of conservative to primitive variables
 
@@ -101,9 +101,9 @@ def compute_conservatives(
         _d_: int = 0,
         _t_ = None,
         U=None,
-        isothermal: bool = False,
         thdiffusion: bool = False,
-        npassive=0)->np.ndarray:
+        npassive=0,
+        **kwargs)->np.ndarray:
     """
     Transforms array of primitive to conservative variables
 
@@ -147,8 +147,8 @@ def compute_fluxes(
         gamma: float,
         _d_: int = 0,
         F=None,
-        isothermal: bool = False,
-        npassive=0)->np.ndarray:
+        npassive=0,
+        **kwargs)->np.ndarray:
     """
     Returns array of conservative fluxes
 
@@ -198,7 +198,8 @@ def compute_viscous_fluxes(
         beta: float,
         _d_: int=0,
         F=None,
-        npassive=0)->np.ndarray:
+        npassive=0,
+        **kwargs)->np.ndarray:
     """
     Returns array of viscous fluxes for conservative variables
 
@@ -249,7 +250,7 @@ def compute_viscous_fluxes(
     v1  = vels[0]
     #Gradient in normal dimension
     dW1 = dWs[v1-1]
-    #Flux is normal dimension
+    #Flux in normal dimension
     F[v1] = 2*dW1[v1] - beta*dW1[v1]
     #Energy flux
     F[_p_] = W[v1]*F[v1]
@@ -269,5 +270,6 @@ def compute_thermal_fluxes(
         dW: np.ndarray,
         chi: float,
         _t_: int,
-        _d_: int=0)->np.ndarray:
+        _d_: int=0,
+        **kwargs)->np.ndarray:
     return chi*W[_d_]*dW[_t_]
