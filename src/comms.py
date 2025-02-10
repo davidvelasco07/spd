@@ -49,8 +49,23 @@ class CommHelper():
         self.comm.Sendrecv_replace(buffer,neighbour,sendtag=side,source=neighbour,recvtag=1-side)
         
     def reduce_min(self, M):
+        return self.reduce(M,op="MIN")
+        
+    def reduce_max(self, M):
+        return self.reduce(M,op="MAX")
+    
+    def reduce_sum(self, M):
+        return self.reduce(M,op="SUM")
+        
+    def reduce(self, M, op):
         if self.size>1:
-            return self.comm.allreduce(M,op=MPI.MIN)
+            return self.comm.allreduce(M,op=MPI.__getattribute__(op))
+        else:
+            return M
+        
+    def bcast(self, M):
+        if self.size>1:
+            return self.comm.Bcast(M,root=0)
         else:
             return M
         
