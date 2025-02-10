@@ -130,7 +130,6 @@ class FV_Simulator(Simulator):
                                  self._d_,
                                  self._p_,
                                  self.WB,
-                                 self.isothermal,
                                  self.npassive)
 
     def solve_riemann_problem_fv(self,
@@ -161,7 +160,6 @@ class FV_Simulator(Simulator):
                                         self.gamma,
                                         self.min_c2,
                                         prims,
-                                        isothermal=self.isothermal,
                                         npassive=self.npassive)
         if self.WB:
             #We compute the perturbation over the flux for conservative variables
@@ -207,8 +205,8 @@ class FV_Simulator(Simulator):
 
     def fv_update(self):
         self.dm.U_new[...] = self.dm.U_cv
-        self.compute_fv_fluxes(self.dm.dt)
-        self.fv_apply_fluxes(self.dm.dt)
+        self.compute_fv_fluxes(self.dt)
+        self.fv_apply_fluxes(self.dt)
         self.dm.U_cv[...] = self.dm.U_new
 
     def init_fv_Boundaries(self, M) -> None:

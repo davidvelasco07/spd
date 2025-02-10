@@ -135,7 +135,6 @@ def compute_prediction(W: np.ndarray,
                        _d_: int,
                        _p_: int,
                        WB: bool,
-                       isothermal: bool,
                        npassive: int = 0,
                        )->None:
     """
@@ -153,7 +152,6 @@ def compute_prediction(W: np.ndarray,
         _d_:    Index of density in the Solution array
         _p_:    Index of pressure/energy in the Solution array
         WB:     Wheter to use Well-balanced scheme or not
-        isothermal: Wheter the system is isothermal or not
     Overwrites
     ----------
         dtW:  Solution vector with predictions 
