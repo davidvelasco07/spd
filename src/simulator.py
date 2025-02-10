@@ -5,12 +5,15 @@ from data_management import GPUDataManager
 from comms import CommHelper
 from initial_conditions_3d import sine_wave
 import hydro
+import mhd
 
 class Simulator:
     def __init__(
         self,
         init_fct: Callable = sine_wave,
         eq_fct: Callable = sine_wave,
+        vectorpot_fct: Callable = None,
+        equations = hydro,
         p: int =  1, 
         m: int = -1,
         N: Tuple = (32,32),
@@ -25,7 +28,6 @@ class Simulator:
         chi: float = 1e-4,
         cfl_coeff: float = 0.8,
         min_c2: float = 1E-10,
-        isothermal: bool = False,
         viscosity: bool = False,
         thdiffusion: bool = False,
         potential: bool = False,
@@ -36,9 +38,12 @@ class Simulator:
                      ("periodic","periodic"),
                      ("periodic","periodic")),
         verbose = True,
+        available_time = 3600.0,
     ):
         self.init_fct = init_fct
         self.eq_fct = eq_fct
+        self.vectorpot_fct = vectorpot_fct
+        self.equations = equations
         if m==-1:
             #By default m=p
             m=p
@@ -75,7 +80,6 @@ class Simulator:
         self.chi=chi
         self.cfl_coeff = cfl_coeff
         self.min_c2 = min_c2
-        self.isothermal = isothermal
         self.viscosity = viscosity
         self.thdiffusion = thdiffusion
         self.potential = potential
@@ -85,6 +89,7 @@ class Simulator:
         self.use_cupy = use_cupy 
         self.dm = GPUDataManager(use_cupy)
         self.outputs = []
+        self.available_time = available_time
 
         self.nghx = Nghc
         self.nghy = (0,Nghc) [self.Y]
@@ -172,26 +177,24 @@ class Simulator:
         return M[(slice(None),)+(slice(ngh,-ngh),)*self.ndim+(Ellipsis,)]
 
     def compute_primitives(self,U,**kwargs)->np.ndarray:
-        return hydro.compute_primitives(
+        return self.equations.compute_primitives(
                 U,
                 self.vels,
                 self._p_,
                 self.gamma,
-                isothermal=self.isothermal,
-                thdiffusion=self.thdiffusion,
                 _t_=self._t_,
+                thdiffusion=self.thdiffusion,
                 npassive=self.npassive,
                 **kwargs)
                 
     def compute_conservatives(self,W,**kwargs)->np.ndarray:
-        return hydro.compute_conservatives(
+        return self.equations.compute_conservatives(
                 W,
                 self.vels,
                 self._p_,
                 self.gamma,
-                isothermal=self.isothermal,
-                thdiffusion=self.thdiffusion,
                 _t_=self._t_,
+                thdiffusion=self.thdiffusion,
                 npassive=self.npassive,
                 **kwargs)
     
@@ -201,15 +204,15 @@ class Simulator:
             W = M
         else:
             W = self.compute_primitives(M)
-        hydro.compute_fluxes(W,
+        self.equations.compute_fluxes(W,
                              vels,
                              self._p_,
                              self.gamma,
                              F=F,
-                             isothermal=self.isothermal,
+                             thdiffusion=self.thdiffusion,
                              npassive=self.npassive)
 
-    def compute_viscous_fluxes(self,M,dMs,vels,prims=False)->np.ndarray:
+    def compute_viscous_fluxes(self,M,dMs,vels,prims=False,**kwargs)->np.ndarray:
         assert len(vels)==self.ndim
         if prims:
             W = M
@@ -221,7 +224,8 @@ class Simulator:
                                             self._p_,
                                             self.nu,
                                             self.beta,
-                                            npassive=self.npassive)
+                                            npassive=self.npassive,
+                                            **kwargs)
     
     def compute_thermal_fluxes(self,M,dMs,prims=False)->np.ndarray:
         if prims:
@@ -235,8 +239,7 @@ class Simulator:
         for idim in self.idims:
             vel = self.vels[idim]
             dUdt[vel,...] += U[  0]*grad_phi[idim]
-            if not(self.isothermal):
-                dUdt[_p_,...] += U[vel]*grad_phi[idim]
+            dUdt[_p_,...] += U[vel]*grad_phi[idim]
             
     def compute_dt(self) -> None:
         pass
@@ -246,7 +249,6 @@ class Simulator:
                                                 _p_ = self._p_,
                                                 gamma = self.gamma,
                                                 min_c2 = self.min_c2,
-                                                isothermal=self.isothermal,
                                                 npassive=self.npassive)
     
 

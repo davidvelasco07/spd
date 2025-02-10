@@ -1,5 +1,6 @@
 import numpy as np
 import hydro
+import mhd
 
 class Riemann_solver:
     def __init__(self,name):
@@ -15,17 +16,18 @@ class Riemann_solver:
                   gamma: float,
                   min_c2: float,
                   prims: bool,
+                  equations,
                   **kwargs,):
             if prims:
                 W_L = M_L
                 W_R = M_R
-                U_L = hydro.compute_conservatives(W_L,vels,_p_,gamma,**kwargs)
-                U_R = hydro.compute_conservatives(W_R,vels,_p_,gamma,**kwargs)
+                U_L = equations.compute_conservatives(W_L,vels,_p_,gamma,**kwargs)
+                U_R = equations.compute_conservatives(W_R,vels,_p_,gamma,**kwargs)
             else:
                 U_L = M_L
                 U_R = M_R
-                W_L = hydro.compute_primitives(U_L,vels,_p_,gamma,**kwargs)
-                W_R = hydro.compute_primitives(U_R,vels,_p_,gamma,**kwargs)
+                W_L = equations.compute_primitives(U_L,vels,_p_,gamma,**kwargs)
+                W_R = equations.compute_primitives(U_R,vels,_p_,gamma,**kwargs)
             return solver(W_L,W_R,U_L,U_R,F,vels,_p_,gamma,min_c2,**kwargs)
         return solve
 
@@ -143,7 +145,6 @@ class Riemann_solver:
         F[_d_,...] = r_gdv*v_gdv
         F[v_1,...] = F[_d_]*v_gdv + P_gdv
         F[_p_,...] = v_gdv*(e_gdv + P_gdv)
-        F[_p_] *= 0 if kwargs["isothermal"] else 1
         for vel in vels[1:]:
             F[vel,...] = F[_d_]*np.where(v_star>0,W_L[vel],W_R[vel])
         if npassive>0:
@@ -215,10 +216,44 @@ class Riemann_solver:
         F[_d_,...] = r_gdv*v_gdv
         F[v_1,...] = F[_d_]*v_gdv + P_gdv
         F[_p_,...] = v_gdv*(e_gdv + P_gdv)
-        F[_p_] *= 0 if kwargs["isothermal"] else 1
         for vel in vels[1:]:
             F[vel,...] = F[_d_]*np.where(v_star>0,W_L[vel],W_R[vel])
         if npassive>0:
             _ps_ = _p_+1
             F[_ps_:_ps_+npassive,...] = F[_d_]*np.where(v_star>0,W_L[_ps_:_ps_+npassive],W_R[_ps_:_ps_+npassive])
+        return F
+    
+    def llf_mhd(
+        self,
+        W_L: np.ndarray,
+        W_R: np.ndarray,
+        U_L: np.ndarray,
+        U_R: np.ndarray,
+        F,
+        vels: np.array,
+        _p_: int,
+        gamma: float,
+        min_c2: float,
+        **kwargs,
+    ) -> np.ndarray:
+        #Density index
+        _d_=0 
+        v_1 = vels[0]
+        _b_ = _p_ + kwargs["thdiffusion"] + kwargs["npassive"]
+        
+        B1_L = W_L[v_1+_b_] 
+        B1_R = W_R[v_1+_b_]
+        B2_L = W_L[vels[1]+_b_] 
+        B2_R = W_R[vels[1]+_b_]
+        B3_L = W_L[vels[2]+_b_] 
+        B3_R = W_R[vels[2]+_b_]
+
+        c_L = mhd.compute_fast_vel(W_L[_p_],W_L[0], B1_L, B2_L, B3_L,gamma=gamma, min_c2=min_c2)
+        c_R = mhd.compute_fast_vel(W_R[_p_],W_R[0], B1_R, B2_R, B3_R,gamma=gamma, min_c2=min_c2)
+        c_max = np.maximum(abs(W_L[v_1]),abs(W_R[v_1])) + np.maximum(c_L,c_R)
+    
+        F_L = mhd.compute_fluxes(W_L,vels,_p_,gamma,**kwargs)
+        F_R = mhd.compute_fluxes(W_R,vels,_p_,gamma,**kwargs)
+
+        F = 0.5*(F_R+F_L)-0.5*c_max[np.newaxis]*(U_R-U_L)
         return F
