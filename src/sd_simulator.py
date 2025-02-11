@@ -55,8 +55,6 @@ class SD_Simulator(Simulator):
 
         self.mesh_cv = self.compute_mesh_cv()
         self.compute_positions()
-        self.post_init()
-        self.compute_dt()
     
     def compute_mesh_cv(self) -> np.ndarray:
         Nghe=self.Nghe
@@ -285,7 +283,10 @@ class SD_Simulator(Simulator):
             if dim != other_dim:
                 M_fp = compute_A_from_B(M_fp,self.dm.sp_to_cv,other_dim,self.ndim,ader=ader)
         return M_fp
-
+    
+    def compute_gradient(self,M_fp,dim):
+        return self.compute_sp_from_dfp(M_fp,dim,ader=True)/self.h[dim]
+    
     def compute_dt(self) -> None:
         W = self.dm.W_cv
         c_s = hydro.compute_cs(W[self._p_],W[self._d_],self.gamma,self.min_c2)
@@ -294,13 +295,12 @@ class SD_Simulator(Simulator):
             c += np.abs(W[vel])
         c_max = np.max(c)
         h = self.h_min/(self.p + 1) 
-        dt = h/c_max 
+        dt = h/c_max
+        dt = self.comms.reduce_min(dt).item() 
         if self.viscosity and self.nu>0:
             dt = min(dt,h**2/self.nu*.25)
+        self.dt = self.cfl_coeff*dt
         
-        dt = self.comms.reduce_min(dt)
-        self.dm.dt = self.cfl_coeff*dt
-        self.dt = self.dm.dt.item()
 
     def Comms_fp(self,
              M: np.ndarray,
@@ -339,8 +339,23 @@ class SD_Simulator(Simulator):
         file = f"{folder}/Output_{str(self.noutput).zfill(5)}"
         if self.comms.size>1:
             file += f"_{self.comms.rank}"
-        self.dm.W_cv = np.load(file+".npy")
-        self.dm.U_cv = self.compute_conservatives(self.dm.W_cv)
-        self.dm.U_sp = self.compute_sp_from_cv(self.dm.U_cv)
+        self.dm.W_cv[...] = np.load(file+".npy")
+        self.dm.U_cv[...] = self.compute_conservatives(self.dm.W_cv)
+        self.dm.U_sp[...] = self.compute_sp_from_cv(self.dm.U_cv)
         self.noutput+=1
-        
+
+    def checkpoint(self):
+        folder = self.folder
+        if not os.path.exists(folder) and self.rank==0:
+            os.makedirs(folder)
+            
+        self.comms.barrier()
+
+        file = f"{folder}/Checkpoint"
+        if self.comms.size>1:
+            file += f"_{self.comms.rank}"
+        np.save(file,self.dm.W_cv)
+        self.outputs.append([self.time,self.noutput])
+        if self.rank==0:
+            np.savetxt(folder+"/outputs.out",self.outputs)
+        self.noutput+=1    
