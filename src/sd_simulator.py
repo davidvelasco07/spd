@@ -291,7 +291,7 @@ class SD_Simulator(Simulator):
         W = self.dm.W_cv
         c_s = hydro.compute_cs(W[self._p_],W[self._d_],self.gamma,self.min_c2)
         c = c_s*self.ndim
-        for vel in self.vels:
+        for vel in self.vels[:self.ndim]:
             c += np.abs(W[vel])
         c_max = np.max(c)
         h = self.h_min/(self.p + 1) 

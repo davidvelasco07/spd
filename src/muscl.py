@@ -209,7 +209,7 @@ def MUSCL_Hancock_fluxes(self: Simulator,
     if self.WB:
         if self.potential:
             drho = ((self.dm.M_fv[0]-self.dm.M_eq_fv[0])/self.dm.M_fv[0])[crop(1,-1,0)]
-            for vel in self.vels:
+            for vel in self.vels[:self.ndim]:
                 self.dm.dtM[vel][crop(1,-1,0)] += drho[crop(1,-1,0)]*self.dm.grad_phi_fv[vel-1]
         #We move back to the perturbation
         self.dm.M_fv -= self.dm.M_eq_fv

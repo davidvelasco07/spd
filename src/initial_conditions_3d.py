@@ -28,7 +28,7 @@ def step_function(xyz: np.ndarray,case: int, vx=1, vy=1, vz=1, P=1):
         #Pressure
         return P*np.ones(x.shape)
     else:
-        return np.ones(x.shape)
+        return np.zeros(x.shape)
 
 def sine_wave(xyz: np.ndarray,case: int, A=0.125, vx=1, vy=1, vz=1, P=1):
     if xyz.shape[0]==1:
@@ -54,4 +54,4 @@ def sine_wave(xyz: np.ndarray,case: int, A=0.125, vx=1, vy=1, vz=1, P=1):
         #Pressure
         return P*np.ones(x.shape)
     else:
-        return np.ones(x.shape)
+        return np.zeros(x.shape)

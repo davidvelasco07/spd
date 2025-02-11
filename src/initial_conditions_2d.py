@@ -13,11 +13,11 @@ def step_function(xy: np.ndarray,case: int, vx=1, vy=1, P=1):
     elif case==2:
         #vy
         return vy*np.ones(x.shape)
-    elif case==3:
+    elif case==4:
         #Pressure
         return P*np.ones(x.shape)
     else:
-        return np.ones(x.shape)
+        return np.zeros(x.shape)
     
 def sine_wave(xy: np.ndarray,case: int, A=0.125, vx=1, vy=1, P=1):
     x=xy[0]
@@ -35,7 +35,7 @@ def sine_wave(xy: np.ndarray,case: int, A=0.125, vx=1, vy=1, P=1):
         #Pressure
         return P*np.ones(x.shape)
     else:
-        return np.ones(x.shape)
+        return np.zeros(x.shape)
 
 def KH_instability(xy: np.ndarray, case: int) -> np.ndarray:
     y=xy[1]
@@ -47,7 +47,8 @@ def KH_instability(xy: np.ndarray, case: int) -> np.ndarray:
         return np.where(y<0.25,-0.5,np.where(y<0.75,0.5,-0.5))
     elif case==2:
         return w0*np.sin(4*np.pi*xy[0])*(np.exp(-(y-0.25)**2/(2*sigma**2))+np.exp(-(y-0.75)**2/(2*sigma**2)))
-    elif case==3:
+    elif case==4:
+        #Pressure
         return 2.5*np.ones(y.shape)
     else:
         return np.zeros(xy[0].shape)

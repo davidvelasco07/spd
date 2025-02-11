@@ -8,11 +8,11 @@ def step_function(xy: np.ndarray,case: int, vx=1, P=1):
     elif case==1:
         #vx
         return vx*np.ones(x.shape)
-    elif case==2:
+    elif case==4:
         #Pressure
         return P*np.ones(x.shape)
     else:
-        return np.ones(x.shape)
+        return np.zeros(x.shape)
     
 def sine_wave(xy: np.ndarray,case: int, A=0.125, vx=1, P=1):
     x=xy[0]
@@ -26,7 +26,7 @@ def sine_wave(xy: np.ndarray,case: int, A=0.125, vx=1, P=1):
         #Pressure
         return P*np.ones(x.shape)
     else:
-        return np.ones(x.shape)
+        return np.zeros(x.shape)
     
 def sod_shock_tube(x: np.ndarray, case: int) -> np.ndarray:
     x=x[0]

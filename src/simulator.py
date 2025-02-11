@@ -82,6 +82,7 @@ class Simulator:
         self.min_c2 = min_c2
         self.viscosity = viscosity
         self.thdiffusion = thdiffusion
+        self.passives = passives
         self.potential = potential
         self.WB = WB
         self.verbose = verbose
@@ -111,28 +112,8 @@ class Simulator:
             self.ngh[dim] = self.__getattribute__(f"ngh{dim}") 
             self.h_min = min(self.h_min,self.h[dim])
         self.n_step = 0
-        
-        self.variables = [r"$\rho$"]
-        self._d_ = 0
-        self.vels = np.arange(ndim)+1
-        for dim in self.dims:
-            idim = self.dims[dim]
-            name = f"v{dim}"
-            self.variables.append(name)
-            self.__setattr__(f"_{name}_",self.vels[idim])
-        self.variables.append("P")
-        self._p_  = self.ndim+1
-        self.nvar = self.ndim+2
-        self.npassive = len(passives)
-        for i in range(self.npassive):
-            self.variables.append(passives[i])
-        self.nvar += self.npassive
-        if self.thdiffusion:
-            self._t_ = self.nvar
-            self.nvar += 1
-            self.variables.append("T")
-        else:
-            self._t_ = None
+
+        self.init_fields()
 
         #For Induction and MHD
         if self.ndim == 3:
@@ -153,6 +134,30 @@ class Simulator:
             self.lim[dim] = (start,end)
             #print(self.comms.rank,dim,self.N[dim],self.len[dim],self.lim[dim])
         self.rank = self.comms.rank
+
+    def init_fields(self):
+        self.variables = [r"$\rho$"]
+        self._d_ = 0
+        self.vels = np.arange(3)+1
+        idim=1
+        for dim in "xyz":
+            name = f"v{dim}"
+            self.variables.append(name)
+            self.__setattr__(f"_{name}_",idim)
+            idim+=1
+        self.variables.append("P")
+        self._p_  = 4
+        self.nvar = self._p_+1
+        self.npassive = len(self.passives)
+        for i in range(self.npassive):
+            self.variables.append(self.passives[i])
+        self.nvar += self.npassive
+        if self.thdiffusion:
+            self._t_ = self.nvar
+            self.nvar += 1
+            self.variables.append("T")
+        else:
+            self._t_ = None
 
     def shape(self,idim):
         return (None,)*(self.ndim-idim)+(slice(None),)+(None,)*(idim)
@@ -207,7 +212,6 @@ class Simulator:
                 **kwargs)
     
     def compute_fluxes(self,F,M,vels,prims)->np.ndarray:
-        assert len(vels)==self.ndim
         if prims:
             W = M
         else:

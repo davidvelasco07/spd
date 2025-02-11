@@ -243,7 +243,7 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         dW_fp = {}
         for dim in self.dims:
             idim = self.dims[dim]
-            vels = np.roll(self.vels,-idim)
+            vels = np.roll(self.vels[:self.ndim],-idim)
             idims = self.idims if self.viscosity else [idim]
             for idim in idims:
                 #Interpolate gradients(all directions) to flux points at dim
@@ -457,7 +457,7 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         self.dm.U_eq_cv = self.compute_cv_from_sp(self.dm.U_eq_sp)
         for dim in self.dims:
             idim = self.dims[dim]
-            vels = np.roll(self.vels,-idim)
+            vels = np.roll(self.vels[:self.ndim],-idim)
             U = self.compute_fp_from_sp(U_sp,dim)
             self.dm.__setattr__(f"M_eq_fp_{dim}",self.crop(U))
             M_fp = self.dm.__getattribute__(f"M_eq_fp_{dim}")
