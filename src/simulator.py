@@ -134,6 +134,14 @@ class Simulator:
         else:
             self._t_ = None
 
+        #For Induction and MHD
+        if self.ndim == 3:
+            self.Edims = self.dims
+            self.Eidims = self.idims
+        else:
+            self.Edims={"z":2}
+            self.Eidims={2:"z"}
+
         for dim in self.dims:
             n=self.comms.__getattribute__(f"n{dim}")
             x=self.comms.__getattribute__(f"{dim}")
