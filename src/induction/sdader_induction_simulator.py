@@ -1,3 +1,8 @@
+import sys
+import os
+sys.path.append("torlo/")
+from torlo.ADER import ADER
+
 import numpy as np
 
 from sd_simulator import SD_Simulator
@@ -12,10 +17,8 @@ from slicing import cut, indices, indices2, crop_fv
 
 class SDADER_Induction_Simulator(SD_Simulator):
     def __init__(self,
-                 vectorpot_fct,
                  *args,
                  **kwargs):
-        self.vectorpot_fct = vectorpot_fct
         super().__init__(*args, **kwargs)
         self.variables=[]
         for dim in self.dims:
@@ -23,7 +26,7 @@ class SDADER_Induction_Simulator(SD_Simulator):
             self.variables.append(name)
         self.variables.append(r"$B^2$")
         self.variables.append(r"$S$")
-        self.nvar = self.ndim+2
+        self.nvar = 5
         
         # ADER matrix.
         self.dm.x_tp, self.dm.w_tp = gauss_legendre_quadrature(0.0, 1.0, self.m + 1)
@@ -32,9 +35,14 @@ class SDADER_Induction_Simulator(SD_Simulator):
         self.dm.invader = np.einsum("p,np->np",self.dm.w_tp,self.dm.invader)
         #number of time slices
         self.nader = self.m+1
-
+        ## replacing ADER matrices
+        self.ader  = ADER(-1,self.m+1,'gaussLegendre')
+        self.nader = self.ader.M_sub+1
+        self.dm.invader = self.ader.evolMat
+        self.dm.w_tp = self.ader.bADER.flatten()
+        self.post_init()
+        self.compute_dt()
         self.ader_arrays()
-        self.compute_positions()
         self.init_E_Boundaries_sd()
 
     def post_init(self) -> None:
@@ -43,12 +51,18 @@ class SDADER_Induction_Simulator(SD_Simulator):
         ngh = self.Nghe
         #Initialization of magnetic field
         A_ep = {}
-        for dim in "xyz":
+        
+        for dim,idim in zip(self.Edims,self.Eidims):
             x = self.x_sp if dim=="x" else self.x_fp
-            y = self.y_sp if dim=="y" else self.y_fp
-            z = self.z_sp if dim=="z" else self.z_fp
-            mesh = self.compute_mesh([x,y,z])
-            A = self.vectorpot_fct(mesh,self.dims[dim])
+            dims=[x]
+            if self.ndim>1:
+                y = self.y_sp if dim=="y" else self.y_fp
+                dims.append(y)
+            if self.ndim>2:
+                z = self.z_sp if dim=="z" else self.z_fp
+                dims.append(z)
+            mesh = self.compute_mesh(dims)
+            A = self.vectorpot_fct(mesh,idim)
             A_ep[dim] = self.crop(A[na])[0]
         # A(z^f,y^f,x^f) -> Bz(z^f,y^s,x^s), By(z^s,y^f,x^s), Bx(z^s,y^s,x^f)
         #Bx = dyAz - dzAy
@@ -56,8 +70,12 @@ class SDADER_Induction_Simulator(SD_Simulator):
         #Bz = dxAy - dyAx
         for dim in self.dims:
             dim1,dim2 = self.other_dims(dim)
-            B_fp  = self.compute_sp_from_dfp(A_ep[dim2][na],dim1)[0]/self.h[dim1]
-            B_fp -= self.compute_sp_from_dfp(A_ep[dim1][na],dim2)[0]/self.h[dim2]
+            B_fp = self.array_fp(dims=dim)[0]
+            B_fp[...] = 0
+            if dim1 in self.dims:
+                B_fp += self.compute_sp_from_dfp(A_ep[dim2][na],dim1)[0]/self.h[dim1]    
+            if dim2 in self.dims:
+                B_fp -= self.compute_sp_from_dfp(A_ep[dim1][na],dim2)[0]/self.h[dim2]
             #B_fp = self.crop(B_fp)
             self.__setattr__(f"B{dim}_init_fp",B_fp)
             self.dm.__setattr__(f"B{dim}_fp",B_fp.copy())
@@ -75,14 +93,15 @@ class SDADER_Induction_Simulator(SD_Simulator):
 
     def compute_dt(self):
         W = self.dm.W_cp
-        vel = W[0]*0
-        for idim in self.idims:
+        vel = W[0].copy()
+        for idim in range(1,self.ndim):
             vel += np.abs(W[idim])
         c_max = np.max(vel)
         h = self.h_min/(self.p + 1) 
         dt = h/c_max 
         if self.nu>0:
-            dt = min(dt,h**2/self.nu*.25)
+            dt_nu=(0.25*self.h_min/(self.p+1))**2/self.nu
+            dt = min(dt,dt_nu)
         dt = self.comms.reduce_min(dt)
         self.dt = self.cfl_coeff*dt.item()
 
@@ -128,23 +147,18 @@ class SDADER_Induction_Simulator(SD_Simulator):
         # Ey -> (z^f,y^s,x^f)
         # Ex -> (z^f,y^f,x^s)
         dims=["yz","zx","xy"]
-        for dim in "xyz":
-            idim = self.dims[dim]
+        for dim,idim in zip(self.Edims,self.Eidims):
             E_ep = self.array_fp(dims=dims[idim],ader=True)
             self.dm.__setattr__(f"E{dim}_ader_ep",E_ep)
-        
-        for dim in self.dims:
-            
-            #Conservative/Primitive varibles at flux points
-            self.dm.__setattr__(f"B{dim}_ader_fp",self.array_fp(dims=dim,ader=True)[0])
-            for dim1,dim2 in [self.other_dims(dim),self.other_dims(dim)[::-1]]:
+            for dim2 in self.other_dims(dim):
                 #Arrays to Solve Riemann problem at the interface between elements
                 self.dm.__setattr__(f"E{dim}L_ep_{dim2}",self.array_RS(dim=dim2,dim2=dim,ader=True))
                 self.dm.__setattr__(f"E{dim}R_ep_{dim2}",self.array_RS(dim=dim2,dim2=dim,ader=True))
                 #Arrays to communicate boundary values
                 self.dm.__setattr__(f"BC_E{dim}_ep_{dim2}",self.array_BC(dim=dim2,dim2=dim,ader=True))
-                #print(f"E{dim}L_ep_{dim2}",self.dm.__getattribute__(f"E{dim}L_ep_{dim2}").shape)
-                #print(f"BC_E{dim}_ep_{dim2}",self.dm.__getattribute__(f"BC_E{dim}_ep_{dim2}").shape)
+        
+        for dim in self.dims:
+            self.dm.__setattr__(f"B{dim}_ader_fp",self.array_fp(dims=dim,ader=True)[0])
 
     def create_dicts(self):
         """
@@ -156,29 +170,33 @@ class SDADER_Induction_Simulator(SD_Simulator):
         for name in names:
             self.__setattr__(name,{})
         for dim in self.dims:
-            self.__getattribute__("E_ader_ep")[dim] = self.dm.__getattribute__(f"E{dim}_ader_ep")
             self.__getattribute__("B_ader_fp")[dim] = self.dm.__getattribute__(f"B{dim}_ader_fp")
             self.__getattribute__("B_fp")[dim] = self.dm.__getattribute__(f"B{dim}_fp")
+        for dim in self.Edims:
+            self.__getattribute__("E_ader_ep")[dim] = self.dm.__getattribute__(f"E{dim}_ader_ep")
 
         names = ["R_ep","L_ep"]
         for name in names:
             E = {}
             self.__setattr__("E"+name,E)
-            for dim in self.dims:
+            for dim in self.Edims:
                 E[dim] = {}
                 for dim2 in self.other_dims(dim):
                     E[dim][dim2] = self.dm.__getattribute__(f"E{dim}{name}_{dim2}")
         
         BC = {}
         self.BC_E_ep = BC
-        for dim in self.dims:
+        for dim in self.Edims:
             BC[dim] = {}
             for dim2 in self.other_dims(dim):
                 BC[dim][dim2] = self.dm.__getattribute__(f"BC_E{dim}_ep_{dim2}")
 
     def other_dims(self,dim):
         dims = ["yz","zx","xy"]
-        idim = self.dims[dim]
+        if dim in self.dims:
+            idim = self.dims[dim]
+        else:
+            idim = 2
         dim1 = dims[idim][0]
         dim2 = dims[idim][1]
         return dim1,dim2
@@ -201,8 +219,8 @@ class SDADER_Induction_Simulator(SD_Simulator):
         #dBydt = dEzdx - dExdz
         #dBzdt = dExdy - dEydx
         dim1,dim2 = self.other_dims(dim)
-        dBdt  = self.compute_sp_from_dfp(self.E_ader_ep[dim1],dim2,ader=True)[0]/self.h[dim2]
-        dBdt -= self.compute_sp_from_dfp(self.E_ader_ep[dim2],dim1,ader=True)[0]/self.h[dim1]
+        dBdt  = self.compute_sp_from_dfp(self.E_ader_ep[dim1],dim2,ader=True)[0]/self.h[dim2] if dim1 in self.Edims else 0
+        dBdt -= self.compute_sp_from_dfp(self.E_ader_ep[dim2],dim1,ader=True)[0]/self.h[dim1] if dim2 in self.Edims else 0
         return dBdt*self.dt
 
     def ader_predictor(self,prims: bool = False) -> None:
@@ -217,6 +235,8 @@ class SDADER_Induction_Simulator(SD_Simulator):
         # m+1: order and number of iterations
         for ader_iter in range(self.m + 1):
             self.solve_edges(ader_iter)
+            if self.nu>0:
+                self.add_nabla_terms()
             if ader_iter < self.m:
                 # 2c) Compute new iteration value.
                 # Axes labels:
@@ -242,19 +262,12 @@ class SDADER_Induction_Simulator(SD_Simulator):
     def solve_edges(self, ader_iter):
         na=np.newaxis
         # Interpolate B to edge points
-        for dim in self.dims:
+        for dim in self.Edims:
             dim1,dim2 = self.other_dims(dim)
-            B1 = self.compute_fp_from_sp(self.B_ader_fp[dim1][na],dim2,ader=True)[0]
-            B2 = self.compute_fp_from_sp(self.B_ader_fp[dim2][na],dim1,ader=True)[0]
-            v =  self.compute_sp_from_fp(self.dm.W_cp,dim)
-            v1 = v[self.dims[dim1]]
-            v2 = v[self.dims[dim2]]
-
-            self.E_ader_ep[dim][0] = v1*B2 - v2*B1
-            self.E_ader_ep[dim][1] = B1
-            self.E_ader_ep[dim][2] = B2
-            self.E_ader_ep[dim][3] = v1[na]
-            self.E_ader_ep[dim][4] = v2[na]
+            B1 = self.compute_fp_from_sp(self.B_ader_fp[dim1][na],dim2,ader=True)[0] if dim1 in self.dims else 0
+            B2 = self.compute_fp_from_sp(self.B_ader_fp[dim2][na],dim1,ader=True)[0] if dim2 in self.dims else 0
+            
+            self.fill_E_array(self.E_ader_ep[dim],B1,B2,dim,ader=True)
 
             _v1_ = 3     
             for dim1,dim2 in [self.other_dims(dim),self.other_dims(dim)[::-1]]:
@@ -263,8 +276,28 @@ class SDADER_Induction_Simulator(SD_Simulator):
                                           self.ER_ep[dim][dim1],_v1_)
                 _v1_+=1
                 self.apply_edges(E,self.E_ader_ep[dim],dim1)
-            if self.nu>0:
-                self.add_nabla_terms(dim)
+
+    def compute_vels(self,dim,dim1,dim2):
+        if self.ndim==3:
+            v =  self.compute_sp_from_fp(self.dm.W_cp,dim)
+        else:
+            v = self.dm.W_cp
+        v1 = v[self.dims[dim1]]
+        v2 = v[self.dims[dim2]]
+        return v1,v2
+    
+    def fill_E_array(self,E_ep,B1,B2,dim,ader=False):
+        dim1,dim2 = self.other_dims(dim)
+        v1,v2 = self.compute_vels(dim,dim1,dim2)
+        E_ep[0] = v1*B2 - v2*B1
+        E_ep[1] = B1
+        E_ep[2] = B2
+        if ader:
+            E_ep[3] = v1[np.newaxis]
+            E_ep[4] = v2[np.newaxis]
+        else:  
+            E_ep[3] = v1
+            E_ep[4] = v2
             
     def E_riemann_solver(self,EL,ER,_v1_):
         v = np.where(np.abs(EL[_v1_]) > np.abs(ER[_v1_]), EL[_v1_], ER[_v1_])
@@ -273,29 +306,28 @@ class SDADER_Induction_Simulator(SD_Simulator):
     def compute_gradient(self,M_fp,dim):
         return self.compute_sp_from_dfp(M_fp,dim,ader=True)/self.h[dim]
     
-    def add_nabla_terms(self,dim):
+    def add_nabla_terms(self):
         """
         This routine adds terms involving second order derivatives in space,
         such as viscosity and thermal diffusion.
         """
         na=np.newaxis
         #E = nu*(d1B2-d2B1)
-        dB_fp = {}
-        dims = self.other_dims(dim)
-        for dim1,dim2 in [dims,dims[::-1]]:
-            B = self.compute_fp_from_sp(self.B_ader_fp[dim1][na],dim=dim2,ader=True)
-            self.E_ader_ep[dim][1] = B
-            self.E_Boundaries_sd(self.E_ader_ep[dim],dim,dim2) 
-            #Make a choice of values (here left)
-            self.apply_edges(self.EL_ep[dim][dim2][1][na],B,dim2)
-            dB_sp = self.compute_gradient(B,dim2)
-            dB_fp[dim1] = self.compute_fp_from_sp(dB_sp,dim=dim2,ader=True)
-            self.E_ader_ep[dim][1] = dB_fp[dim1]
-            self.E_Boundaries_sd(self.E_ader_ep[dim],dim,dim2) 
-            self.apply_edges(self.ER_ep[dim][dim2][1][na],dB_fp[dim1],dim2)
-        #print(dim1,dim2)
-        #print(self.E_ader_ep[dim].shape,dB_fp[dim1].shape,dB_fp[dim2].shape)
-        self.E_ader_ep[dim][0] -= self.nu*(dB_fp[dim1][0]-dB_fp[dim2][0])
+        for dim in self.Edims:
+            dB_fp = {}
+            dims = self.other_dims(dim)
+            for dim1,dim2 in [dims,dims[::-1]]:
+                B = self.compute_fp_from_sp(self.B_ader_fp[dim1][na],dim=dim2,ader=True)
+                self.E_ader_ep[dim][1] = B
+                self.E_Boundaries_sd(self.E_ader_ep[dim],dim,dim2) 
+                #Make a choice of values (here left)
+                self.apply_edges(self.EL_ep[dim][dim2][1][na],B,dim2)
+                dB_sp = self.compute_gradient(B,dim2)
+                dB_fp[dim1] = self.compute_fp_from_sp(dB_sp,dim=dim2,ader=True)
+                self.E_ader_ep[dim][1] = dB_fp[dim1]
+                self.E_Boundaries_sd(self.E_ader_ep[dim],dim,dim2) 
+                self.apply_edges(self.ER_ep[dim][dim2][1][na],dB_fp[dim1],dim2)
+            self.E_ader_ep[dim][0] -= self.nu*(dB_fp[dim1][0]-dB_fp[dim2][0])
             
 
     ####################
@@ -334,39 +366,27 @@ class SDADER_Induction_Simulator(SD_Simulator):
         while(self.time < t_end):
             if not self.n_step % 100 and self.rank==0 and self.verbose:
                 print(f"Time step #{self.n_step} (t = {self.time})",end="\r")
-            self.compute_dt()   
+            self.compute_dt()
             if(self.time + self.dt >= t_end):
                 self.dt = t_end-self.time
             if(self.dt < 1E-14):
-                print(f"dt={self.dt}")
-                break
+                break   
             self.status = self.perform_update()
         self.end_sim()          
 
     def init_E_Boundaries_sd(self) -> None:
-        na = np.newaxis
         #This is necessary when the BCs are the ICs
-        dims = ["yz","zx","xy"]
-        for dim in self.dims:
-            idim = self.dims[dim]
-            dim1 = dims[idim][0]
-            dim2 = dims[idim][1]
+        for dim,idim in zip(self.Edims,self.Eidims):
+            dim1,dim2 = self.other_dims(dim)
+            na = np.newaxis
             B1 = self.dm.__getattribute__(f"B{dim1}_fp") 
             B1 = self.compute_fp_from_sp(B1[na],dim2)[0]
             B2 = self.dm.__getattribute__(f"B{dim2}_fp") 
             B2 = self.compute_fp_from_sp(B2[na],dim1)[0]
-            v = self.compute_sp_from_fp(self.dm.W_cp,dim)
-            v1 = v[self.dims[dim1]]
-            v2 = v[self.dims[dim2]]
-
-            E_ep = self.array_fp(dims=dims[idim])
-            E_ep[0] = v1*B2 - v2*B1
-            E_ep[1] = B1
-            E_ep[2] = B2
-            E_ep[3] = v1
-            E_ep[4] = v2
-
-            for dim1,dim2 in [self.other_dims(dim),self.other_dims(dim)[::-1]]:
+            E_ep = self.array_fp(dims=dim1+dim2) 
+            print(dim,dim1,dim2,E_ep.shape) 
+            self.fill_E_array(E_ep,B1,B2,dim)
+            for dim2 in self.other_dims(dim):
                 BC = self.dm.__getattribute__(f"BC_E{dim}_ep_{dim2}")
                 BC[0][...] =  self.E_cut(E_ep[:,np.newaxis], 0,dim2,dim2)
                 BC[1][...] =  self.E_cut(E_ep[:,np.newaxis],-1,dim2,dim2)
@@ -467,3 +487,28 @@ class SDADER_Induction_Simulator(SD_Simulator):
                        self.dims[dim1],
                        dim1,
                        self.Nghc)
+            
+    def compute_B2(self):
+        Bx = self.compute_sp_from_fp(self.dm.Bx_fp[np.newaxis],"x")[0]
+        By = self.compute_sp_from_fp(self.dm.By_fp[np.newaxis],"y")[0] if self.ndim>1 else 0
+        Bz = self.compute_sp_from_fp(self.dm.Bz_fp[np.newaxis],"z")[0] if self.ndim>2 else 0
+        B2 = (Bx**2+By**2+Bz**2)
+        B2 = self.compute_cv_from_sp(B2[np.newaxis])
+        return B2
+
+    def output(self):
+        folder = self.folder
+        if not os.path.exists(folder) and self.rank==0:
+            os.makedirs(folder)
+            
+        self.comms.barrier()
+
+        file = f"{folder}/Output_{str(self.noutput).zfill(5)}"
+        if self.comms.size>1:
+            file += f"_{self.comms.rank}"
+        B2 = self.compute_B2()
+        np.save(file,B2)
+        self.outputs.append([self.time,self.noutput])
+        if self.rank==0:
+            np.savetxt(folder+"/outputs.out",self.outputs)
+        self.noutput+=1
