@@ -160,6 +160,7 @@ class FV_Simulator(Simulator):
                                         self.gamma,
                                         self.min_c2,
                                         prims,
+                                        self.equations,
                                         npassive=self.npassive)
         if self.WB:
             #We compute the perturbation over the flux for conservative variables
