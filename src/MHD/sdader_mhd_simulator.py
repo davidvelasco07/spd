@@ -33,7 +33,7 @@ class SDADER_MHD_Simulator(SDADER_Simulator,SDADER_Induction_Simulator):
         self.equations=equations
         self.godunov=False
         self.b={}
-        for dim in self.dims:
+        for dim in "xyz":
             name = f"$B_{dim}$"
             self.variables.append(name)
             self.__setattr__(f"_b{dim}_",self.nvar)

@@ -129,5 +129,6 @@ def compute_fluxes(
     if npassive>0:
         _ps_ = _p_+1
         F[_ps_:_ps_+npassive,...] = m*W[_ps_:_ps_+npassive]
-    F[shift,...] = 0
+    for v in vels:
+        F[v+shift,...] = W[v1]*W[v+shift] - W[v]*B_1
     return F
