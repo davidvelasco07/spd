@@ -1,3 +1,7 @@
+import sys
+sys.path.append("torlo/")
+from torlo.ADER import ADER
+
 import numpy as np
 
 from sd_simulator import SD_Simulator
@@ -46,6 +50,13 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         self.dm.invader = np.einsum("p,np->np",self.dm.w_tp,self.dm.invader)
         #number of time slices
         self.nader = self.m+1
+
+        ## replacing ADER matrices
+        self.ader  = ADER(-1,self.m+1,'gaussLegendre')
+        self.nader = self.ader.M_sub+1
+        self.dm.invader = self.ader.evolMat
+        self.dm.w_tp = self.ader.bADER.flatten()
+
         if not(self.godunov):
             self.ader_arrays()
             self.init_sd_Boundaries()
@@ -163,7 +174,7 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
                 #Let's store dUdt first
                 s = self.ader_string()
                 self.dm.U_ader_sp[...] = np.einsum(f"np,up{s}->un{s}",self.dm.invader,
-                                                    self.ader_dudt())*self.dm.dt
+                                                    self.ader_dudt())*self.dt
                 #Update
                 # U_new = U_old - dUdt
                 self.dm.U_ader_sp[...] = self.dm.U_sp[:,na] - self.dm.U_ader_sp
@@ -171,14 +182,12 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
     def ader_update(self):
         # dUdt = (dFxdx + dFydy + dFzdz + S)dt 
         s = self.ader_string()
-        dUdt = (np.einsum(f"t,ut{s}->u{s}",self.dm.w_tp,self.ader_dudt())*self.dm.dt)
+        dUdt = (np.einsum(f"t,ut{s}->u{s}",self.dm.w_tp,self.ader_dudt())*self.dt)
 
         # U_new = U_old - dUdt
         self.dm.U_sp -= dUdt
-
-        # Compute primitive variables at solution points from updated solution    
-        #self.dm.W_sp =  self.compute_primitives(self.dm.U_sp)
-
+        self.dm.U_cv[...] = self.compute_cv_from_sp(self.dm.U_sp)
+        
     def solve_faces(self, M, ader_iter, prims=False)->None:
         na=np.newaxis
         # Interpolate M(U or W) to flux points
@@ -313,7 +322,7 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         self.switch_to_finite_volume()
         for i_ader in range(self.nader):
             self.dm.W_cv[...] = self.compute_primitives_cv(self.dm.U_cv)
-            dt = self.dm.dt*self.dm.w_tp[i_ader]
+            dt = self.dt*self.dm.w_tp[i_ader]
             if not(self.godunov):
                 self.store_high_order_fluxes(i_ader)
             #Compute candidate solution
@@ -358,6 +367,7 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         return True
 
     def init_sim(self):
+        self.checkpoint = False
         self.dm.switch_to(CupyLocation.device)
         self.create_dicts()
         self.execution_time = -timer() 
@@ -370,6 +380,13 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         self.dm.W_cv[...] = self.compute_primitives(self.dm.U_cv)
         if self.rank==0:
             print(f"t={self.time}, steps taken {self.n_step}, time taken {self.execution_time}")
+
+    def elapsed_time(self):
+        return self.execution_time + timer() 
+
+    def cost_per_step(self):
+        cost = 0 if self.n_step==0 else self.elapsed_time()/self.n_step
+        return cost
 
     def perform_iterations(self, n_step: int) -> None:
         self.init_sim()
@@ -390,6 +407,14 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
                 print(f"dt={self.dt}")
                 break
             self.status = self.perform_update()
+            if not(self.checkpoint):
+                if ((self.available_time-self.elapsed_time())<120) and self.rank==0:
+                    self.checkpoint=True
+                self.checkpoint = self.comms.reduce_max(self.checkpoint)
+                if self.checkpoint:
+                    self.output()
+                    print("Checkpoint")
+                    self.noutput-=1
         self.end_sim()          
 
     def init_sd_Boundaries(self) -> None:

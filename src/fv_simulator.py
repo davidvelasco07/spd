@@ -207,8 +207,8 @@ class FV_Simulator(Simulator):
 
     def fv_update(self):
         self.dm.U_new[...] = self.dm.U_cv
-        self.compute_fv_fluxes(self.dm.dt)
-        self.fv_apply_fluxes(self.dm.dt)
+        self.compute_fv_fluxes(self.dt)
+        self.fv_apply_fluxes(self.dt)
         self.dm.U_cv[...] = self.dm.U_new
 
     def init_fv_Boundaries(self, M) -> None:

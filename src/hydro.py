@@ -249,7 +249,7 @@ def compute_viscous_fluxes(
     v1  = vels[0]
     #Gradient in normal dimension
     dW1 = dWs[v1-1]
-    #Flux is normal dimension
+    #Flux in normal dimension
     F[v1] = 2*dW1[v1] - beta*dW1[v1]
     #Energy flux
     F[_p_] = W[v1]*F[v1]

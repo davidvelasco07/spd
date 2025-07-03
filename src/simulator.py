@@ -36,6 +36,7 @@ class Simulator:
                      ("periodic","periodic"),
                      ("periodic","periodic")),
         verbose = True,
+        available_time = 3600.0,
     ):
         self.init_fct = init_fct
         self.eq_fct = eq_fct
@@ -85,6 +86,7 @@ class Simulator:
         self.use_cupy = use_cupy 
         self.dm = GPUDataManager(use_cupy)
         self.outputs = []
+        self.available_time = available_time
 
         self.nghx = Nghc
         self.nghy = (0,Nghc) [self.Y]
@@ -209,7 +211,7 @@ class Simulator:
                              isothermal=self.isothermal,
                              npassive=self.npassive)
 
-    def compute_viscous_fluxes(self,M,dMs,vels,prims=False)->np.ndarray:
+    def compute_viscous_fluxes(self,M,dMs,vels,prims=False,**kwargs)->np.ndarray:
         assert len(vels)==self.ndim
         if prims:
             W = M
@@ -221,7 +223,8 @@ class Simulator:
                                             self._p_,
                                             self.nu,
                                             self.beta,
-                                            npassive=self.npassive)
+                                            npassive=self.npassive,
+                                            **kwargs)
     
     def compute_thermal_fluxes(self,M,dMs,prims=False)->np.ndarray:
         if prims:

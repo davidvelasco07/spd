@@ -1,3 +1,8 @@
+import sys
+import os
+sys.path.append("torlo/")
+from torlo.ADER import ADER
+
 import numpy as np
 
 from sd_simulator import SD_Simulator
@@ -32,6 +37,11 @@ class SDADER_Induction_Simulator(SD_Simulator):
         self.dm.invader = np.einsum("p,np->np",self.dm.w_tp,self.dm.invader)
         #number of time slices
         self.nader = self.m+1
+        ## replacing ADER matrices
+        self.ader  = ADER(-1,self.m+1,'gaussLegendre')
+        self.nader = self.ader.M_sub+1
+        self.dm.invader = self.ader.evolMat
+        self.dm.w_tp = self.ader.bADER.flatten()
 
         self.ader_arrays()
         self.compute_positions()
@@ -75,14 +85,15 @@ class SDADER_Induction_Simulator(SD_Simulator):
 
     def compute_dt(self):
         W = self.dm.W_cp
-        vel = W[0]*0
-        for idim in self.idims:
+        vel = W[0].copy()
+        for idim in range(1,self.ndim):
             vel += np.abs(W[idim])
         c_max = np.max(vel)
         h = self.h_min/(self.p + 1) 
         dt = h/c_max 
         if self.nu>0:
-            dt = min(dt,h**2/self.nu*.25)
+            dt_nu=(0.25*self.h_min/(self.p+1))**2/self.nu
+            dt = min(dt,dt_nu)
         dt = self.comms.reduce_min(dt)
         self.dt = self.cfl_coeff*dt.item()
 
@@ -293,8 +304,6 @@ class SDADER_Induction_Simulator(SD_Simulator):
             self.E_ader_ep[dim][1] = dB_fp[dim1]
             self.E_Boundaries_sd(self.E_ader_ep[dim],dim,dim2) 
             self.apply_edges(self.ER_ep[dim][dim2][1][na],dB_fp[dim1],dim2)
-        #print(dim1,dim2)
-        #print(self.E_ader_ep[dim].shape,dB_fp[dim1].shape,dB_fp[dim2].shape)
         self.E_ader_ep[dim][0] -= self.nu*(dB_fp[dim1][0]-dB_fp[dim2][0])
             
 
@@ -334,12 +343,11 @@ class SDADER_Induction_Simulator(SD_Simulator):
         while(self.time < t_end):
             if not self.n_step % 100 and self.rank==0 and self.verbose:
                 print(f"Time step #{self.n_step} (t = {self.time})",end="\r")
-            self.compute_dt()   
+            self.compute_dt()
             if(self.time + self.dt >= t_end):
                 self.dt = t_end-self.time
             if(self.dt < 1E-14):
-                print(f"dt={self.dt}")
-                break
+                break   
             self.status = self.perform_update()
         self.end_sim()          
 
@@ -467,3 +475,28 @@ class SDADER_Induction_Simulator(SD_Simulator):
                        self.dims[dim1],
                        dim1,
                        self.Nghc)
+            
+    def compute_B2(self):
+        Bx = self.compute_sp_from_fp(self.dm.Bx_fp[np.newaxis],"x")[0]
+        By = self.compute_sp_from_fp(self.dm.By_fp[np.newaxis],"y")[0]
+        Bz = self.compute_sp_from_fp(self.dm.Bz_fp[np.newaxis],"z")[0]
+        B2 = (Bx**2+By**2+Bz**2)
+        B2 = self.compute_cv_from_sp(B2[np.newaxis])
+        return B2
+
+    def output(self):
+        folder = self.folder
+        if not os.path.exists(folder) and self.rank==0:
+            os.makedirs(folder)
+            
+        self.comms.barrier()
+
+        file = f"{folder}/Output_{str(self.noutput).zfill(5)}"
+        if self.comms.size>1:
+            file += f"_{self.comms.rank}"
+        B2 = self.compute_B2()
+        np.save(file,B2)
+        self.outputs.append([self.time,self.noutput])
+        if self.rank==0:
+            np.savetxt(folder+"/outputs.out",self.outputs)
+        self.noutput+=1
