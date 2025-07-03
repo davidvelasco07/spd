@@ -127,8 +127,30 @@ class SDADER_MHD_Simulator(SDADER_Simulator,SDADER_Induction_Simulator):
         self.time += self.dt
         return True
     
-    def compute_dt(self):
-        return SDADER_Simulator.compute_dt(self)
+    def compute_dt(self) -> None:
+        W = self.dm.W_cv
+        c_max = 0
+        for dim in self.dims:
+            dim1,dim2 = self.other_dims(dim)
+            c_max += self.equations.compute_fast_vel(W[self._p_],
+                                                     W[self._d_],
+                                                     W[self.b[dim]],
+                                                     W[self.b[dim1]] if dim1 in self.dims else 0,
+                                                     W[self.b[dim2]] if dim2 in self.dims else 0,
+                                                     self.gamma,self.min_c2)
+        
+        c_max = np.max(c_max)
+        h = self.h_min/(self.p + 1) 
+        dt = h/c_max
+        dt = self.comms.reduce_min(dt).item() 
+        if self.viscosity and self.nu>0:
+            nu = max(self.nu,self.chi)
+            dt_nu=(0.25*self.h_min/(self.p+1))**2/nu
+            dt = min(dt,dt_nu)
+        self.dt = self.cfl_coeff*dt
+    
+    def output(self):
+        return SDADER_Simulator.output(self)
     
     def compute_vels(self,dim,dim1,dim2,ader=False):
         v1 = self.vels[self.dims[dim1]]
