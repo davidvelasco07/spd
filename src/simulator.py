@@ -225,17 +225,17 @@ class Simulator:
                              npassive=self.npassive)
 
     def compute_viscous_fluxes(self,M,dMs,vels,prims=False,**kwargs)->np.ndarray:
-        assert len(vels)==self.ndim
         if prims:
             W = M
         else:
             W = self.compute_primitives(M)
-        return hydro.compute_viscous_fluxes(W,
+        return self.equations.compute_viscous_fluxes(W,
                                             vels,
                                             dMs,
                                             self._p_,
                                             self.nu,
                                             self.beta,
+                                            thdiffusion=self.thdiffusion,
                                             npassive=self.npassive,
                                             **kwargs)
     
