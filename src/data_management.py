@@ -63,7 +63,7 @@ def GPUDataManager(use_gpu: bool):
             if CUPY_AVAILABLE:
                 if isinstance(arr, cp.ndarray):
                     return cp.asnumpy(arr)
-            raise BaseException(f"({CUPY_AVAILABLE=}) Cannot convert array of type {type(arr)} to numpy.ndarray.")
+            raise BaseException(f"({CUPY_AVAILABLE}) Cannot convert array of type {type(arr)} to numpy.ndarray.")
         
     return GPUDM(use_gpu)
 
