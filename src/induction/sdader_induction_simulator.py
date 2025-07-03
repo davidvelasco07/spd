@@ -314,20 +314,32 @@ class SDADER_Induction_Simulator(SD_Simulator):
         na=np.newaxis
         #E = nu*(d1B2-d2B1)
         for dim in self.Edims:
-            dB_fp = {}
+            dB_ep = {}
             dims = self.other_dims(dim)
             for dim1,dim2 in [dims,dims[::-1]]:
+                #Move from face to edge points
                 B = self.compute_fp_from_sp(self.B_ader_fp[dim1][na],dim=dim2,ader=True)
                 self.E_ader_ep[dim][1] = B
-                self.E_Boundaries_sd(self.E_ader_ep[dim],dim,dim2) 
-                #Make a choice of values (here left)
-                self.apply_edges(self.EL_ep[dim][dim2][1][na],B,dim2)
-                dB_sp = self.compute_gradient(B,dim2)
-                dB_fp[dim1] = self.compute_fp_from_sp(dB_sp,dim=dim2,ader=True)
-                self.E_ader_ep[dim][1] = dB_fp[dim1]
-                self.E_Boundaries_sd(self.E_ader_ep[dim],dim,dim2) 
-                self.apply_edges(self.ER_ep[dim][dim2][1][na],dB_fp[dim1],dim2)
-            self.E_ader_ep[dim][0] -= self.nu*(dB_fp[dim1][0]-dB_fp[dim2][0])
+
+                #2D Riemann solver
+                for d in [dim1,dim2]:
+                    self.E_Boundaries_sd(self.E_ader_ep[dim],dim,d) 
+                    #Make a choice of values (here left)
+                    self.apply_edges(self.EL_ep[dim][d][1][na],B,d)
+                
+                #Compute gradient at face points
+                dB_fp = self.compute_gradient(B,dim2)
+                #Move back to edge points
+                dB_ep[dim1] = self.compute_fp_from_sp(dB_fp,dim=dim2,ader=True)
+                self.E_ader_ep[dim][1] = dB_ep[dim1]
+                
+                #2D Riemann solver
+                for d in [dim1,dim2]:
+                    self.E_Boundaries_sd(self.E_ader_ep[dim],dim,d) 
+                    #Make complementary choice of values (here right)
+                    self.apply_edges(self.ER_ep[dim][d][1][na],dB_ep[dim1],d)
+
+            self.E_ader_ep[dim][0] -= self.nu*(dB_ep[dim1][0]-dB_ep[dim2][0])
             
 
     ####################
