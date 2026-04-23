@@ -392,6 +392,9 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         if (self.adapt_interval is not None
                 and self.n_step % self.adapt_interval == 0
                 and (self.refine_fn is not None or self.derefine_fn is not None)):
+            # perform_update only refreshes W_cv; refresh W_sp too so the
+            # tagging predicates see the post-step primitive state.
+            self.dm.W_sp[...] = self.compute_primitives(self.dm.U_sp)
             to_r, to_d = self.tag_blocks(
                 refine_fn=self.refine_fn,
                 derefine_fn=self.derefine_fn,
