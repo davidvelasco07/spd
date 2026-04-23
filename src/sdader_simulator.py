@@ -14,6 +14,7 @@ import sd_boundary as bc
 from trouble_detection import detect_troubles
 from timeit import default_timer as timer
 from slicing import cut, indices, indices2, crop_fv
+from amr.transfer import prolongate_block, restrict_blocks
 
 class SDADER_Simulator(SD_Simulator,FV_Simulator):
     def __init__(self,
@@ -380,7 +381,167 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         self.checkpoint = False
         self.dm.switch_to(CupyLocation.device)
         self.create_dicts()
-        self.execution_time = -timer() 
+        self.execution_time = -timer()
+
+    # ------------------------------------------------------------------ AMR
+    def _sd_arrays_realloc(self) -> None:
+        """Re-allocate every Nb-sized SD array after a forest change.
+
+        Primary solution arrays (U_sp/W_sp/U_cv/W_cv) are reallocated; the
+        caller is responsible for populating U_sp. ADER flux/RS/BC buffers
+        and their per-dim dicts are rebuilt.
+        """
+        self.dm.W_cv = self.array_sp(ader=False)
+        self.dm.W_sp = self.array_sp(ader=False)
+        self.dm.U_sp = self.array_sp(ader=False)
+        self.dm.U_cv = self.array_sp(ader=False)
+        if not self.godunov:
+            self.ader_arrays()
+            self.init_sd_Boundaries()
+        self.create_dicts()
+        self._refresh_block_metrics()
+
+    def _snapshot_U_sp(self) -> dict:
+        """Snapshot U_sp keyed by (level, logical)."""
+        return {
+            (b.level, b.logical): self.dm.U_sp[:, ib].copy()
+            for ib, b in enumerate(self.forest.blocks)
+        }
+
+    def _transfer_from_snapshot(self, snapshot: dict) -> None:
+        """Populate self.dm.U_sp for every block in the new forest, using
+        direct copy / prolongate / restrict as appropriate. Recomputes the
+        derived W_sp / U_cv / W_cv afterwards."""
+        ndim = self.ndim
+        dim_keys = list(self.dims.keys())
+        LM_p = self.dm.LM_prolong
+        LM_r = self.dm.LM_restrict
+        for ib, block in enumerate(self.forest.blocks):
+            key = (block.level, block.logical)
+            if key in snapshot:
+                self.dm.U_sp[:, ib] = snapshot[key]
+                continue
+            # Try prolongation from parent.
+            parent_logical = tuple(c // 2 for c in block.logical)
+            parent_key = (block.level - 1, parent_logical)
+            if parent_key in snapshot:
+                parent_U = snapshot[parent_key]
+                children_U = prolongate_block(parent_U, LM_p, ndim)
+                # child_id = sum_k 2^k * sub_offset[k], k indexing dim_keys order.
+                sub_idx = 0
+                for k, d in enumerate(dim_keys):
+                    offset = block.logical[k] - 2 * parent_logical[k]
+                    sub_idx += (1 << k) * offset
+                self.dm.U_sp[:, ib] = children_U[:, sub_idx]
+                continue
+            # Try restriction from children.
+            child_keys = []
+            for sub_idx in range(2 ** ndim):
+                child_logical = tuple(
+                    2 * block.logical[k] + ((sub_idx >> k) & 1)
+                    for k in range(ndim)
+                )
+                child_keys.append((block.level + 1, child_logical))
+            if all(k in snapshot for k in child_keys):
+                stack = np.stack([snapshot[k] for k in child_keys], axis=1)
+                self.dm.U_sp[:, ib] = restrict_blocks(stack, LM_r, ndim)
+                continue
+            raise RuntimeError(
+                f"No source data for block {key} (ib={ib}): neither the "
+                f"block itself, its parent {parent_key}, nor its full set "
+                f"of children was in the snapshot."
+            )
+        self.dm.W_sp[...] = self.compute_primitives(self.dm.U_sp)
+        self.dm.U_cv[...] = self.compute_cv_from_sp(self.dm.U_sp)
+        self.dm.W_cv[...] = self.compute_cv_from_sp(self.dm.W_sp)
+
+    def tag_blocks(self,
+                   refine_fn=None,
+                   derefine_fn=None,
+                   max_level: int = None):
+        """Tag blocks for refinement / derefinement via user predicates.
+
+        Parameters
+        ----------
+        refine_fn(block, W_block) -> bool : True to refine this block.
+                 Blocks already at max_level are skipped.
+        derefine_fn(parent_logical, sibling_blocks, sibling_W) -> bool :
+                 True to merge this sibling group. Only called for groups
+                 where all 2**ndim siblings exist and are at the same level.
+
+        Returns
+        -------
+        to_refine : list[int]
+        to_derefine : list[list[int]]
+        """
+        to_refine = []
+        if refine_fn is not None:
+            for ib, block in enumerate(self.forest.blocks):
+                if max_level is not None and block.level >= max_level:
+                    continue
+                if refine_fn(block, self.dm.W_sp[:, ib]):
+                    to_refine.append(ib)
+
+        to_derefine = []
+        if derefine_fn is not None:
+            # Group blocks by parent logical; only full sibling groups qualify.
+            groups = {}
+            for ib, b in enumerate(self.forest.blocks):
+                if b.level == 0:
+                    continue
+                pl_key = (b.level, tuple(c // 2 for c in b.logical))
+                groups.setdefault(pl_key, []).append(ib)
+            n_sib = 2 ** self.ndim
+            for (lvl, parent_logical), ibs in groups.items():
+                if len(ibs) != n_sib:
+                    continue
+                sibs = [self.forest.blocks[i] for i in ibs]
+                sib_W = [self.dm.W_sp[:, i] for i in ibs]
+                if derefine_fn(parent_logical, sibs, sib_W):
+                    to_derefine.append(ibs)
+        return to_refine, to_derefine
+
+    def adapt(self, to_refine=None, to_derefine=None) -> None:
+        """Apply refinement and/or derefinement to the forest and transfer
+        existing data onto the new block layout.
+
+        Parameters
+        ----------
+        to_refine : list of int, optional
+            Block ibs to refine. Each one becomes 2**ndim children.
+        to_derefine : list of list of int, optional
+            Each inner list is 2**ndim sibling ibs to merge into one
+            coarser parent.
+
+        2:1 balance is enforced automatically (cascading refinement for
+        any remaining level gaps > 1). Block data propagates via
+        prolongate_block (for newly refined children) and restrict_blocks
+        (for newly coarsened parents).
+        """
+        to_refine = list(to_refine or [])
+        to_derefine = list(to_derefine or [])
+        if not to_refine and not to_derefine:
+            return
+        # Snapshot BEFORE mutating the forest.
+        snapshot = self._snapshot_U_sp()
+        # Resolve ib references to block objects so the forest-mutation
+        # order is independent.
+        refine_refs = [self.forest.blocks[i] for i in to_refine]
+        derefine_refs = [[self.forest.blocks[i] for i in sibs]
+                         for sibs in to_derefine]
+        # Apply changes.
+        for block in refine_refs:
+            ib = self.forest.blocks.index(block)
+            self.forest.refine_block(ib)
+        for sibs in derefine_refs:
+            sib_ibs = [self.forest.blocks.index(b) for b in sibs]
+            self.forest.derefine_block(sib_ibs)
+        self.forest.enforce_2to1_balance()
+        # Reallocate SD arrays with the new Nb, then populate from snapshot.
+        self._sd_arrays_realloc()
+        self._transfer_from_snapshot(snapshot)
+        # dt may shrink because new fine blocks have smaller h.
+        self.compute_dt()
 
     def end_sim(self):
         self.dm.switch_to(CupyLocation.host)
