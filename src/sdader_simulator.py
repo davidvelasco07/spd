@@ -429,11 +429,11 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
 
     # ------------------------------------------------------------------ AMR
     def _sd_arrays_realloc(self) -> None:
-        """Re-allocate every Nb-sized SD array after a forest change.
+        """Re-allocate every Nb-sized array after a forest change.
 
         Primary solution arrays (U_sp/W_sp/U_cv/W_cv) are reallocated; the
-        caller is responsible for populating U_sp. ADER flux/RS/BC buffers
-        and their per-dim dicts are rebuilt.
+        caller is responsible for populating U_sp. ADER flux/RS/BC buffers,
+        FV buffers (when update=="FV"), and the per-dim dicts are rebuilt.
         """
         self.dm.W_cv = self.array_sp(ader=False)
         self.dm.W_sp = self.array_sp(ader=False)
@@ -442,6 +442,17 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         if not self.godunov:
             self.ader_arrays()
             self.init_sd_Boundaries()
+        # FV buffers also carry the Nb axis and must track forest changes.
+        if self.update == "FV":
+            self.fv_arrays()
+            if self.FB:
+                self.fb_arrays()
+            # init_fv_Boundaries needs the (newly allocated) FV-layout W_gh;
+            # it is used only during trouble detection's "ic" / "eq" BCs and
+            # at pressure-type domain boundaries, so we rebuild it from the
+            # current U_cv instead of the long-gone post_init snapshot.
+            # Skip the explicit re-init here; fv_Boundaries will refill the
+            # ghost slabs on every fv_update iteration from the live M_fv.
         self.create_dicts()
         self._refresh_block_metrics()
 
