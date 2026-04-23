@@ -5,7 +5,7 @@ from simulator import Simulator
 import riemann_solver as rs
 import muscl
 
-from slicing import cut, crop_fv
+from slicing import cut, crop_fv, indices
 from amr.tree import SAME, FINER, COARSER, BC as BC_TAG
 
 class FV_Simulator(Simulator):
@@ -58,11 +58,11 @@ class FV_Simulator(Simulator):
         self.BC_fv = defaultdict(list)
 
         for dim in self.dims:
-            # faces / centers / h_fp / h_cv were set per-block by
-            # sd_simulator.compute_positions; do not overwrite them with the
-            # rank-global X_fp / X_cv (which are kept for viz).
-            self.h_fp[dim] = self.dm.__getattribute__(f"d{dim}_fp")
-            self.h_cv[dim] = self.dm.__getattribute__(f"d{dim}_cv")
+            # faces / centers / h_fp / h_cv are kept as the per-block
+            # arrays produced by sd_simulator._refresh_block_metrics (they
+            # carry the Nb axis and the 1/2**level scaling for AMR). Do
+            # NOT overwrite them here with the rank-global level-0 d{dim}_fp
+            # / d{dim}_cv from the dm: that version has no Nb axis.
             self.F_faces[dim] = self.dm.__getattribute__(f"F_faces_{dim}")
             self.F_faces_FB[dim] = self.dm.__getattribute__(f"F_faces_FB{dim}")
             self.MR_faces[dim] = self.dm.__getattribute__(f"MR_faces_{dim}")
@@ -446,6 +446,63 @@ class FV_Simulator(Simulator):
             else:
                 dest_slice.append(slice(ngh, -ngh))
         bc_slot[tuple(dest_slice)] = coarse_avg
+
+    def correct_coarse_fine_fv_flux(self, F_faces: np.ndarray, dim: str) -> None:
+        """Enforce conservation across coarse-fine FV faces.
+
+        Overwrites the coarse block's face flux at every CF face with the
+        arithmetic mean of the fine neighbors' face flux on the same
+        physical interface:
+
+            F_coarse(y) = (1 / 2**(ndim-1)) * sum_{k fine-subs} F_fine_k
+
+        Under uniform FV cell areas (A_fine = A_coarse / 2**(ndim-1)) this
+        guarantees that the coarse block's integrated flux through the
+        face equals the sum of the fine blocks' integrated fluxes, so a
+        unit of mass leaving the coarse block is exactly the mass arriving
+        at the fine blocks. Must be called after the flux computation and
+        before ``fv_apply_fluxes``.
+
+        Supports 1D/2D/3D. ``F_faces`` has layout
+        [nvar, Nb, ...cells..., (cells_dim + 1 on the face axis)].
+        """
+        idim = self.dims[dim]
+        ndim = self.ndim
+        _view = lambda arr, ib_, n: arr[(slice(None),) * n + (ib_,)]
+        for ib, block in enumerate(self.forest.blocks):
+            for side in (0, 1):
+                entries = block.neighbors[dim][side]
+                if not entries or entries[0][1] != FINER:
+                    continue
+                # Coarse face index along the face-dim axis; neighbor's
+                # matching face is the opposite side.
+                my_face_idx   = 0 if side == 0 else -1
+                fine_face_idx = -1 if side == 0 else 0
+                n_sub = 2 ** (ndim - 1)
+                fine_fluxes = [None] * n_sub
+                for (jb, _rel, sub) in entries:
+                    src = _view(F_faces, jb, 1)
+                    fine_fluxes[sub] = src[indices(fine_face_idx, idim)]
+                # After face indexing, shape is [nvar, ...transverse cells...].
+                # Sub-index bit k corresponds to the k-th non-dim in natural
+                # self.dims order; inner bit (0) -> last axis, outer bit (1)
+                # -> axis 1 (same convention as _fv_fill_from_finer).
+                if ndim == 1:
+                    combined = fine_fluxes[0]
+                elif ndim == 2:
+                    combined = np.concatenate(fine_fluxes, axis=ndim - 1)
+                else:   # ndim == 3 — 4 fine neighbors in a 2x2 tile.
+                    lo = np.concatenate([fine_fluxes[0], fine_fluxes[1]],
+                                         axis=ndim - 1)
+                    hi = np.concatenate([fine_fluxes[2], fine_fluxes[3]],
+                                         axis=ndim - 1)
+                    combined = np.concatenate([lo, hi], axis=1)
+                # Average pairs on every transverse axis to reduce
+                # 2**(ndim-1) fine sub-faces -> 1 coarse face value.
+                avg_axes = tuple(range(1, ndim))
+                coarse_flux = (self._fv_avg_pairs(combined, avg_axes)
+                               if avg_axes else combined)
+                _view(F_faces, ib, 1)[indices(my_face_idx, idim)] = coarse_flux
 
     def fv_apply_BC(self,
                  dim: str) -> None:

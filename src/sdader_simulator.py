@@ -365,12 +365,28 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
             dt = self.dt*self.dm.w_tp[i_ader]
             if not(self.godunov):
                 self.store_high_order_fluxes(i_ader)
+            # Apply the CF flux correction once here too when FB is on: the
+            # candidate U_new built from the non-CF-corrected F_faces would
+            # bias the DMP check and alter theta. (Non-FB paths are the
+            # caller's problem - they handle CF-correction upstream at the
+            # SD level.)
+            if self.FB and self.forest.max_level > 0:
+                for dim in self.dims:
+                    self.correct_coarse_fine_fv_flux(self.F_faces[dim], dim)
             #Compute candidate solution
             self.fv_apply_fluxes(dt)
             if self.FB:
                 detect_troubles(self)
                 self.compute_fv_fluxes(dt)
                 self.correct_fluxes()
+                # CF-consistent fluxes for AMR: the (theta*F_FB + (1-theta)*F_HO)
+                # blend is generally NOT equal on the two sides of a coarse-fine
+                # face because theta varies across it, so it leaks mass across
+                # levels. Overwrite the coarse-side face flux with the average
+                # of the fine-side fluxes to restore strict conservation.
+                if self.forest.max_level > 0:
+                    for dim in self.dims:
+                        self.correct_coarse_fine_fv_flux(self.F_faces[dim], dim)
                 #Compute corrected solution
                 self.fv_apply_fluxes(dt)
             #Update solution
