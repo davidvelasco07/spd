@@ -221,6 +221,11 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
                                        thdiffusion=self.thdiffusion,
                                        _t_=self._t_)
             bc.apply_interfaces(self,F,self.F_ader_fp[dim],dim)
+            # AMR conservation: at coarse-fine faces, overwrite the coarse
+            # block's face flux with the restriction of the fine-side
+            # Riemann flux so the two sides agree on the integrated flux.
+            if self.forest.max_level > 0:
+                bc.correct_coarse_fine_flux(self,self.F_ader_fp[dim],dim)
             if self.WB:
                 #F->F'
                 self.F_ader_fp[dim]-=self.dm.__getattribute__(f"F_eq_fp_{dim}")[:,na]

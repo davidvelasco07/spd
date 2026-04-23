@@ -55,6 +55,9 @@ class SD_Simulator(Simulator):
         self.dm.cv_to_sp = np.linalg.inv(self.dm.sp_to_cv)
         # AMR: coarse <-> fine solution-point transfer operators.
         self.dm.LM_prolong, self.dm.LM_restrict = build_transfer_matrices(self.x_sp)
+        # AMR: per-meshblock element size. Shape [Nb] per dim; broadcast over
+        # [nvar, (nader,) Nb, ...] when scaling the divergence operator.
+        self._refresh_block_metrics()
 
         self.mesh_cv = self.compute_mesh_cv()
         self.compute_positions()
@@ -344,14 +347,32 @@ class SD_Simulator(Simulator):
     def compute_sp_from_dfp(self,M_fp,dim,**kwargs) -> np.ndarray:
         return compute_A_from_B(M_fp,self.dm.dfp_to_sp,dim,self.ndim,**kwargs)
     
+    def _refresh_block_metrics(self) -> None:
+        """Cache per-block 1/h[dim] with broadcastable shape over the SD
+        arrays [nvar, (nader,) Nb, cells, pts]."""
+        self._inv_h_block = {}
+        self._inv_h_block_ader = {}
+        for dim in self.dims:
+            arr = np.array([1.0 / b.h[dim] for b in self.forest.blocks])
+            # Non-ADER: [1, Nb, 1,1,1, 1,1,1] (ndim cells + ndim pts trailing).
+            shape_na = (1,) + (-1,) + (1,) * (2 * self.ndim)
+            # ADER: add nader axis between nvar and Nb.
+            shape_a = (1, 1) + (-1,) + (1,) * (2 * self.ndim)
+            self._inv_h_block[dim] = arr.reshape(shape_na)
+            self._inv_h_block_ader[dim] = arr.reshape(shape_a)
+        self.h_min = min(b.h[d] for b in self.forest.blocks for d in self.dims)
+
+    def _inv_h(self, dim, ader):
+        return (self._inv_h_block_ader if ader else self._inv_h_block)[dim]
+
     def compute_sp_from_dfp_x(self,ader=True):
-        return self.compute_sp_from_dfp(self.dm.F_ader_fp_x,"x",ader=ader)/self.dx
-        
+        return self.compute_sp_from_dfp(self.dm.F_ader_fp_x,"x",ader=ader) * self._inv_h("x", ader)
+
     def compute_sp_from_dfp_y(self,ader=True):
-        return self.compute_sp_from_dfp(self.dm.F_ader_fp_y,"y",ader=ader)/self.dy
-        
+        return self.compute_sp_from_dfp(self.dm.F_ader_fp_y,"y",ader=ader) * self._inv_h("y", ader)
+
     def compute_sp_from_dfp_z(self,ader=True):
-        return self.compute_sp_from_dfp(self.dm.F_ader_fp_z,"z",ader=ader)/self.dz
+        return self.compute_sp_from_dfp(self.dm.F_ader_fp_z,"z",ader=ader) * self._inv_h("z", ader)
     
     def integrate_faces(self,M_fp,dim,ader=True):
         for other_dim in self.dims:

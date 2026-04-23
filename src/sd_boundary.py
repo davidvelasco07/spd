@@ -4,6 +4,7 @@ from slicing import cut
 from slicing import indices
 from slicing import indices2
 from amr.tree import SAME, FINER, COARSER, BC
+from amr.transfer import prolongate_block, restrict_blocks
 
 
 def _block_view(M: np.ndarray, ib: int, n_lead: int) -> np.ndarray:
@@ -64,17 +65,21 @@ def store_BC(self: SD_Simulator,
     # Hydro ADER call sites always pass arrays with leading [nvar, nader]
     # before the Nb axis.
     n_lead = 2
+    LM_prolong = self.dm.LM_prolong
+    LM_restrict = self.dm.LM_restrict
     for ib, block in enumerate(self.forest.blocks):
         for side in (0, 1):
             entries = block.neighbors[dim][side]
             bc_slot = _block_view(BC_array[side], ib, n_lead)
-            # For SAME/COARSER/BC there is exactly one entry. For FINER
-            # there are 2**(ndim-1) entries; Phase 2c will handle them.
-            if len(entries) == 1 and entries[0][1] == SAME:
+            # Neighbor's "opposite face" trace (right-face if my side==0, etc.).
+            face_idx = indices2(side - 1, ndim, idim)
+            rel0 = entries[0][1]
+
+            if len(entries) == 1 and rel0 == SAME:
                 jb, _rel, _sub = entries[0]
-                src = _block_view(M, jb, n_lead)
-                bc_slot[...] = src[indices2(side - 1, ndim, idim)]
-            elif len(entries) == 1 and entries[0][1] == BC:
+                bc_slot[...] = _block_view(M, jb, n_lead)[face_idx]
+
+            elif len(entries) == 1 and rel0 == BC:
                 src = _block_view(M, ib, n_lead)
                 bc_type = self.BC[dim][side]
                 if bc_type == "reflective":
@@ -88,15 +93,43 @@ def store_BC(self: SD_Simulator,
                     src[indices2(-side, ndim, idim)] = bc_slot
                 else:
                     raise ValueError(f"Undetermined boundary type: {bc_type}")
+
+            elif len(entries) == 1 and rel0 == COARSER:
+                # Fine block looking at a coarser neighbor: prolongate the
+                # coarse face trace to fine resolution and pick our sub-face.
+                jb, _rel, sub = entries[0]
+                coarse_trace = _block_view(M, jb, n_lead)[face_idx]
+                if ndim == 1:
+                    bc_slot[...] = coarse_trace
+                else:
+                    prolongated = prolongate_block(
+                        coarse_trace, LM_prolong, ndim - 1
+                    )
+                    # prolongated shape: [nvar, nader, 2**(ndim-1), trans_cells, trans_pts]
+                    bc_slot[...] = prolongated[(slice(None),) * n_lead + (sub,)]
+
+            elif all(e[1] == FINER for e in entries):
+                # Coarse block looking at finer neighbors: collect the
+                # 2**(ndim-1) fine traces (ordered by sub_idx) and restrict.
+                if ndim == 1:
+                    jb, _rel, _sub = entries[0]
+                    bc_slot[...] = _block_view(M, jb, n_lead)[face_idx]
+                else:
+                    n_sub = 2 ** (ndim - 1)
+                    assert len(entries) == n_sub, (
+                        f"expected {n_sub} finer neighbors; got {len(entries)}")
+                    traces = [None] * n_sub
+                    for (jb, _rel, sub) in entries:
+                        traces[sub] = _block_view(M, jb, n_lead)[face_idx]
+                    stack = np.stack(traces, axis=n_lead)
+                    # stack shape: [nvar, nader, 2**(ndim-1), trans_cells, trans_pts]
+                    bc_slot[...] = restrict_blocks(stack, LM_restrict, ndim - 1)
+
             else:
-                # FINER / COARSER: coarse-fine flux-point interface lives
-                # in Phase 2c. Static SMR can still build and visualize
-                # forests; only time-stepping at coarse-fine faces fails.
                 rels = [e[1] for e in entries]
                 raise NotImplementedError(
-                    f"Coarse-fine face not yet supported "
-                    f"(ib={ib}, dim={dim}, side={side}, rels={rels}). "
-                    f"Phase 2c.")
+                    f"Mixed neighbor relations {rels} not yet handled "
+                    f"(ib={ib}, dim={dim}, side={side}).")
 
 
 def apply_BC(self: SD_Simulator,
@@ -118,3 +151,44 @@ def Boundaries_sd(self: SD_Simulator,
     store_interfaces(self, M, dim)
     self.Comms_fp(M, dim)
     apply_BC(self, dim)
+
+
+def correct_coarse_fine_flux(self: SD_Simulator,
+                             F_fp: np.ndarray,
+                             dim: str) -> None:
+    """At coarse-fine faces, overwrite the coarse block's face flux in
+    ``F_fp`` with the restriction of the fine-side Riemann fluxes.
+
+    This restores strict conservation: Riemann is nonlinear, so
+    `restrict(F_fine)` and `F(restrict(fine_traces))` differ; using the
+    fine-side answer on both sides of the face makes the coarse block's
+    update match the sum of the fine blocks' updates over the shared area.
+    Must be called AFTER ``apply_interfaces``.
+    """
+    idim = self.dims[dim]
+    ndim = self.ndim
+    n_lead = 2
+    LM_restrict = self.dm.LM_restrict
+    for ib, block in enumerate(self.forest.blocks):
+        for side in (0, 1):
+            entries = block.neighbors[dim][side]
+            if not entries or entries[0][1] != FINER:
+                continue
+            # Shared face: my side's face flux lives at indices2(-side, ndim, idim);
+            # each fine neighbor's opposite face flux at indices2(side-1, ndim, idim).
+            fine_face_sel = indices2(side - 1, ndim, idim)
+            my_face_sel = indices2(-side, ndim, idim)
+            my_view = _block_view(F_fp, ib, n_lead)
+
+            if ndim == 1:
+                (jb, _rel, _sub) = entries[0]
+                fine_F = _block_view(F_fp, jb, n_lead)[fine_face_sel]
+                my_view[my_face_sel] = fine_F
+            else:
+                n_sub = 2 ** (ndim - 1)
+                assert len(entries) == n_sub
+                fluxes = [None] * n_sub
+                for (jb, _rel, sub) in entries:
+                    fluxes[sub] = _block_view(F_fp, jb, n_lead)[fine_face_sel]
+                stack = np.stack(fluxes, axis=n_lead)
+                my_view[my_face_sel] = restrict_blocks(stack, LM_restrict, ndim - 1)
