@@ -133,18 +133,22 @@ def compute_smooth_extrema(self, U, dim):
     # Second derivative d2Udx2(i) = [dU(i+1)-dU(i-1)]/[x_cv(i+1)-x_cv(i-1)]
     d2U = first_order_derivative(dU, centers[cut(1,-1,idim)], idim)
     dv = 0.5 * self.h_fp[dim][cut(2,-2,idim)] * d2U
+    # Safe denominator: replace zeros with 1 *before* dividing so numpy
+    # never emits a divide-by-zero warning; the resulting alpha at those
+    # locations is overwritten to 1 immediately below.
+    dv_safe = np.where(np.abs(dv) <= eps, 1.0, dv)
     # vL = dU(i-1)-dU(i)
     vL = dU[cut(None,-2,idim)] - dU[cut(1,-1,idim)]
     # alphaL = min(1,max(vL,0)/(-dv)),1,min(1,min(vL,0)/(-dv)) for dv<0,dv=0,dv>0
     alphaL = (
-        -np.where(dv < 0, np.where(vL > 0, vL, 0), np.where(vL < 0, vL, 0)) / dv
+        -np.where(dv < 0, np.where(vL > 0, vL, 0), np.where(vL < 0, vL, 0)) / dv_safe
     )
     alphaL = np.where(np.abs(dv) <= eps, 1, alphaL)
     alphaL = np.where(alphaL < 1, alphaL, 1)
     # vR = dU(i+1)-dU(i)
     vR = dU[cut( 2,None,idim)] - dU[cut(1,-1,idim)]
     # alphaR = min(1,max(vR,0)/(dv)),1,min(1,min(vR,0)/(dv)) for dv>0,dv=0,dv<0
-    alphaR = np.where(dv > 0, np.where(vR > 0, vR, 0), np.where(vR < 0, vR, 0)) / dv
+    alphaR = np.where(dv > 0, np.where(vR > 0, vR, 0), np.where(vR < 0, vR, 0)) / dv_safe
     alphaR = np.where(np.abs(dv) <= eps, 1, alphaR)
     alphaR = np.where(alphaR < 1, alphaR, 1)
     alphaR = np.where(alphaR < alphaL, alphaR, alphaL)
