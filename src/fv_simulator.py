@@ -412,26 +412,30 @@ class FV_Simulator(Simulator):
             src = _view(M, jb, 1)
             fine_slabs[sub] = src[fine_interior][active_tv]
 
+        # bit_axes: which per-block cell axis each sub_idx bit addresses.
+        # Bit k iterates the k-th non-dim in natural self.dims order (matches
+        # _sub_face_index). For a per-block FV array [nvar, cells_z, cells_y,
+        # cells_x], the cell axis for dim `d` is (ndim - self.dims[d]).
+        bit_axes = [ndim - self.dims[d] for d in dim_keys
+                    if self.dims[d] != idim]
+
         if ndim == 1:
             combined = fine_slabs[0]                  # [nvar, 2*ngh]
-            avg_axes = (1,)
         elif ndim == 2:
-            # Transverse axis position in the slab: for FV per-block view
-            # [nvar, cells_y, cells_x], idim=0 -> transverse is axis 1 (y),
-            # idim=1 -> transverse is axis 2 (x). After active_tv, each
-            # sub-slab has shape [nvar, NyB*n, 2*ngh] for idim=0.
-            tv_axis = 1 if idim == 1 else 2
-            # Axis 1 is y for 2D. Wait — FV per-block is [nvar, cells_y,
-            # cells_x]. For idim=0 (x), transverse dim y is axis 1. For
-            # idim=1 (y), transverse dim x is axis 2. Axes count includes
-            # leading nvar.
-            tv_axis = {0: 1, 1: 2}[idim]
-            combined = np.concatenate(fine_slabs, axis=tv_axis)
-            avg_axes = (1, 2)
-        else:
-            raise NotImplementedError(
-                "FV CF fill is 1D/2D-only in this phase; 3D (4 fine "
-                "neighbors) will follow in a later pass.")
+            combined = np.concatenate(fine_slabs, axis=bit_axes[0])
+        else:    # ndim == 3: 4 fine neighbors in a 2x2 tile on the face.
+            # Inner bit (bit 0) concatenates sub 0+1 and sub 2+3 along
+            # the inner transverse axis; outer bit (bit 1) joins those
+            # two pairs along the outer transverse axis.
+            inner_lo = np.concatenate([fine_slabs[0], fine_slabs[1]],
+                                       axis=bit_axes[0])
+            inner_hi = np.concatenate([fine_slabs[2], fine_slabs[3]],
+                                       axis=bit_axes[0])
+            combined = np.concatenate([inner_lo, inner_hi],
+                                       axis=bit_axes[1])
+        # Average pairs on every cell axis (normal + transverse) to
+        # restrict 2**ndim fine cells -> 1 coarse cell.
+        avg_axes = tuple(range(1, ndim + 1))
         coarse_avg = self._fv_avg_pairs(combined, avg_axes)
         # Fill the active-transverse region of bc_slot; transverse corners
         # will be overwritten by the subsequent dim passes of fv_Boundaries.
