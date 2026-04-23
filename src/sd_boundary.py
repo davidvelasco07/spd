@@ -66,12 +66,15 @@ def store_BC(self: SD_Simulator,
     n_lead = 2
     for ib, block in enumerate(self.forest.blocks):
         for side in (0, 1):
-            jb, rel, _child = block.neighbors[dim][side]
+            entries = block.neighbors[dim][side]
             bc_slot = _block_view(BC_array[side], ib, n_lead)
-            if rel == SAME:
+            # For SAME/COARSER/BC there is exactly one entry. For FINER
+            # there are 2**(ndim-1) entries; Phase 2c will handle them.
+            if len(entries) == 1 and entries[0][1] == SAME:
+                jb, _rel, _sub = entries[0]
                 src = _block_view(M, jb, n_lead)
                 bc_slot[...] = src[indices2(side - 1, ndim, idim)]
-            elif rel == BC:
+            elif len(entries) == 1 and entries[0][1] == BC:
                 src = _block_view(M, ib, n_lead)
                 bc_type = self.BC[dim][side]
                 if bc_type == "reflective":
@@ -80,16 +83,20 @@ def store_BC(self: SD_Simulator,
                 elif bc_type == "gradfree":
                     bc_slot[...] = src[indices2(-side, ndim, idim)]
                 elif bc_type in ("ic", "eq"):
-                    pass  # BC_array is pre-populated elsewhere
+                    pass
                 elif bc_type == "pressure":
-                    # Overwrite solution with stored BC values.
                     src[indices2(-side, ndim, idim)] = bc_slot
                 else:
                     raise ValueError(f"Undetermined boundary type: {bc_type}")
             else:
+                # FINER / COARSER: coarse-fine flux-point interface lives
+                # in Phase 2c. Static SMR can still build and visualize
+                # forests; only time-stepping at coarse-fine faces fails.
+                rels = [e[1] for e in entries]
                 raise NotImplementedError(
-                    f"Neighbor relation {rel!r} not yet handled in store_BC "
-                    f"(ib={ib}, dim={dim}, side={side}).")
+                    f"Coarse-fine face not yet supported "
+                    f"(ib={ib}, dim={dim}, side={side}, rels={rels}). "
+                    f"Phase 2c.")
 
 
 def apply_BC(self: SD_Simulator,

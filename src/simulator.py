@@ -39,6 +39,7 @@ class Simulator:
                      ("periodic","periodic"),
                      ("periodic","periodic")),
         Nb: Tuple = None,
+        forest_refine=None,
         verbose = True,
         available_time = 3600.0,
     ):
@@ -157,6 +158,12 @@ class Simulator:
         self.forest = BlockForest.uniform_grid(
             self.ndim, self.dims, self.lim, self.NB, self.Nblocks_per_dim, self.BC,
         )
+        # Optional static refinement hook. The callback receives the forest
+        # before SD arrays are allocated, so any refine_block / derefine_block
+        # calls simply widen the Nb axis at allocation time.
+        if forest_refine is not None:
+            forest_refine(self.forest)
+            self.forest.enforce_2to1_balance()
 
     def init_fields(self):
         self.variables = [r"$\rho$"]
