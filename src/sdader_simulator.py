@@ -107,13 +107,14 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
 
     def fb_arrays(self):
         """
-        Allocate arrays to be used in trouble detection
+        Allocate arrays to be used in trouble detection. Zero-initialize
+        to avoid inf/NaN bits leaking from uninitialized memory.
         """
-        self.dm.troubles  = self.array_FV(self.p+1,1)
-        self.dm.theta = self.array_FV(self.p+1,1,ngh=self.Nghc)
+        import numpy as _np
+        self.dm.troubles  = _np.zeros_like(self.array_FV(self.p+1,1))
+        self.dm.theta     = _np.zeros_like(self.array_FV(self.p+1,1,ngh=self.Nghc))
         for dim in self.dims:
-            #Conservative/Primitive varibles at flux points
-            self.dm.__setattr__(f"affected_faces_{dim}",self.array_FV(self.p+1,1,dim=dim))
+            self.dm.__setattr__(f"affected_faces_{dim}",_np.zeros_like(self.array_FV(self.p+1,1,dim=dim)))
 
     def create_dicts(self):
         """
@@ -459,6 +460,7 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
             self.ader_arrays()
             self.init_sd_Boundaries()
         # FV buffers also carry the Nb axis and must track forest changes.
+        # fv_arrays / fb_arrays zero-initialize (see their docstrings).
         if self.update == "FV":
             self.fv_arrays()
             if self.FB:

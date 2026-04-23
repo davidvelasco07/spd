@@ -38,17 +38,21 @@ class FV_Simulator(Simulator):
         return np.ndarray(shape+N[::-1])
     
     def fv_arrays(self)->None:
-        self.dm.M_fv  = self.array_FV(self.p+1,self.nvar,ngh=self.Nghc)
-        self.dm.U_new = self.array_FV(self.p+1,self.nvar)
+        # Zero-initialize everything. Raw np.ndarray returns uninitialized
+        # memory; after reallocation the buffers can contain inf/NaN bits
+        # and `correct_fluxes` (theta*F_FB + (1-theta)*F_faces with theta=1
+        # for godunov) then evaluates 0*inf = NaN, poisoning the blend.
+        self.dm.M_fv  = np.zeros_like(self.array_FV(self.p+1,self.nvar,ngh=self.Nghc))
+        self.dm.U_new = np.zeros_like(self.array_FV(self.p+1,self.nvar))
         if self.predictor:
-            self.dm.dtM = self.array_FV(self.p+1,self.nvar,ngh=self.Nghc-1)
+            self.dm.dtM = np.zeros_like(self.array_FV(self.p+1,self.nvar,ngh=self.Nghc-1))
         for dim in self.dims:
             #Conservative/Primitive varibles at flux points
-            self.dm.__setattr__(f"F_faces_{dim}",self.array_FV(self.p+1,self.nvar,dim=dim))
-            self.dm.__setattr__(f"F_faces_FB{dim}",self.array_FV(self.p+1,self.nvar,dim=dim))
-            self.dm.__setattr__(f"MR_faces_{dim}",self.array_FV(self.p+1,self.nvar,dim=dim))
-            self.dm.__setattr__(f"ML_faces_{dim}",self.array_FV(self.p+1,self.nvar,dim=dim))
-            self.dm.__setattr__(f"BC_fv_{dim}",self.array_FV_BC(dim=dim))
+            self.dm.__setattr__(f"F_faces_{dim}",np.zeros_like(self.array_FV(self.p+1,self.nvar,dim=dim)))
+            self.dm.__setattr__(f"F_faces_FB{dim}",np.zeros_like(self.array_FV(self.p+1,self.nvar,dim=dim)))
+            self.dm.__setattr__(f"MR_faces_{dim}",np.zeros_like(self.array_FV(self.p+1,self.nvar,dim=dim)))
+            self.dm.__setattr__(f"ML_faces_{dim}",np.zeros_like(self.array_FV(self.p+1,self.nvar,dim=dim)))
+            self.dm.__setattr__(f"BC_fv_{dim}",np.zeros_like(self.array_FV_BC(dim=dim)))
 
     def create_dicts_fv(self)->None:
         self.F_faces = defaultdict(list)
