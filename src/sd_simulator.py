@@ -14,6 +14,7 @@ from transforms import compute_A_from_B
 from transforms import compute_A_from_B_full
 
 import riemann_solver as rs
+from amr.transfer import build_transfer_matrices
 
 class SD_Simulator(Simulator):
     def __init__(
@@ -52,6 +53,8 @@ class SD_Simulator(Simulator):
         self.dm.sp_to_cv = intfromsol_matrix(self.x_sp, self.x_fp)
         self.dm.fp_to_cv = intfromsol_matrix(self.x_fp, self.x_fp)
         self.dm.cv_to_sp = np.linalg.inv(self.dm.sp_to_cv)
+        # AMR: coarse <-> fine solution-point transfer operators.
+        self.dm.LM_prolong, self.dm.LM_restrict = build_transfer_matrices(self.x_sp)
 
         self.mesh_cv = self.compute_mesh_cv()
         self.compute_positions()
