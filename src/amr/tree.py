@@ -51,12 +51,17 @@ class BlockForest:
 
     def __init__(self, ndim: int, dims: Dict[str, int],
                  NB: Dict[str, int], bc: Dict[str, Tuple[str, str]],
-                 domain_lim: Dict[str, Tuple[float, float]]):
+                 domain_lim: Dict[str, Tuple[float, float]],
+                 N_base: Dict[str, int] = None):
         self.ndim = ndim
         self.dims = dims
         self.NB = NB
         self.bc = bc
         self.domain_lim = domain_lim
+        # Number of blocks per dim at the coarsest level (used by
+        # _rebuild_neighbors to translate logical coords into a forest-
+        # wide address for dictionary lookup).
+        self.N_base = dict(N_base) if N_base is not None else {d: 1 for d in dims}
         self.blocks: List[MeshBlock] = []
 
     @property
@@ -84,7 +89,8 @@ class BlockForest:
                      Nblocks_per_dim: Dict[str, int],
                      bc: Dict[str, Tuple[str, str]]) -> "BlockForest":
         """Build a uniform grid of same-level blocks tiling the domain."""
-        forest = cls(ndim, dims, NB, bc, dict(lim))
+        forest = cls(ndim, dims, NB, bc, dict(lim),
+                     N_base=dict(Nblocks_per_dim))
         block_len = {d: (lim[d][1] - lim[d][0]) / Nblocks_per_dim[d] for d in dims}
         h = {d: block_len[d] / NB[d] for d in dims}
 
@@ -120,76 +126,138 @@ class BlockForest:
     def _rebuild_neighbors(self) -> None:
         """Recompute ``block.neighbors`` for every block.
 
-        Uses physical extent comparison: two blocks are adjacent if their
-        faces coincide in one dim and overlap in the others. Periodic BC
-        wraps the face position across the domain. O(Nblocks^2); fine for
-        static SMR, can be accelerated with a spatial index later.
+        Uses a ``(level, logical) -> ib`` dictionary for O(1) adjacency
+        queries instead of the physical-extent O(Nblocks^2) scan. For each
+        block's face we only probe the relevant neighbor positions (same
+        level, the single coarser parent, or 2^(ndim-1) finer children),
+        scanning across every level in the current forest so temporary
+        level gaps > 1 (inside ``enforce_2to1_balance``) are still
+        reported correctly.
         """
-        for b in self.blocks:
-            b.ib = self.blocks.index(b)    # keep ib consistent with list index
+        dim_keys = list(self.dims.keys())
+        ndim = self.ndim
+        # Rewire ib + wipe neighbors.
+        for ib, b in enumerate(self.blocks):
+            b.ib = ib
             b.neighbors = {d: [[], []] for d in self.dims}
+        # Forest-wide address: dict[(level, logical)] -> ib.
+        addr = {(b.level, b.logical): ib for ib, b in enumerate(self.blocks)}
+        levels = sorted({b.level for b in self.blocks})
 
-        # Precompute block face positions to handle periodic wrap cheaply.
-        def _faces_in(dim, side, lo, hi):
-            face = lo if side == 0 else hi
-            dlo, dhi = self.domain_lim[dim]
-            candidates = [face]
-            # Periodic wrap: the face at the domain edge is also "at" the
-            # opposite edge for neighbor purposes.
-            if self.bc[dim][side] == "periodic":
-                if abs(face - dlo) < _TOL:
-                    candidates.append(dhi)
-                elif abs(face - dhi) < _TOL:
-                    candidates.append(dlo)
-            return candidates
+        # Grid size at level L per dim.
+        def N_at(L, d):
+            return self.N_base[d] * (1 << L)
 
         for ib, block in enumerate(self.blocks):
+            L = block.level
+            logical = block.logical
             for dim in self.dims:
+                k = dim_keys.index(dim)
                 for side in (0, 1):
-                    face_candidates = _faces_in(
-                        dim, side, block.lim[dim][0], block.lim[dim][1]
-                    )
-                    found_any = False
-                    for jb, other in enumerate(self.blocks):
-                        # Self-matches are allowed and happen naturally when
-                        # the domain is covered by a single block with
-                        # periodic BC (left face wraps to own right face).
-                        other_face = other.lim[dim][1] if side == 0 else other.lim[dim][0]
-                        if not any(abs(other_face - f) < _TOL for f in face_candidates):
-                            continue
-                        # Check overlap in the other dims.
-                        overlap = True
-                        for od in self.dims:
-                            if od == dim:
-                                continue
-                            if (block.lim[od][1] <= other.lim[od][0] + _TOL or
-                                block.lim[od][0] >= other.lim[od][1] - _TOL):
-                                overlap = False
-                                break
-                        if not overlap:
-                            continue
-                        # Level difference -> relation. Level gaps > 1 are
-                        # tagged FINER/COARSER with sub_idx=None; it's the
-                        # job of enforce_2to1_balance to find and refine
-                        # them. Time-stepping kernels may only assume a
-                        # 2:1-balanced forest.
-                        dlev = other.level - block.level
-                        if dlev == 0:
-                            rel = SAME
-                            sub = None
-                        elif dlev > 0:
-                            rel = FINER
-                            sub = (self._sub_face_index(block, other, dim)
-                                   if dlev == 1 else None)
-                        else:
-                            rel = COARSER
-                            sub = (self._sub_face_index(other, block, dim)
-                                   if dlev == -1 else None)
-                        block.neighbors[dim][side].append((jb, rel, sub))
-                        found_any = True
-                    if not found_any:
-                        # Domain boundary.
+                    step = -1 if side == 0 else 1
+                    N_L_d = N_at(L, dim)
+                    # Candidate same-level logical (shift by 1 in `dim`).
+                    new_k = logical[k] + step
+                    out_of_bounds = (new_k < 0 or new_k >= N_L_d)
+                    if out_of_bounds and self.bc[dim][side] != "periodic":
                         block.neighbors[dim][side].append((None, BC, None))
+                        continue
+                    if out_of_bounds:   # periodic wrap
+                        new_k %= N_L_d
+                    same_logical = logical[:k] + (new_k,) + logical[k+1:]
+
+                    # 1) Same-level neighbor.
+                    key = (L, same_logical)
+                    if key in addr:
+                        block.neighbors[dim][side].append(
+                            (addr[key], SAME, None))
+                        continue
+
+                    # 2) Coarser neighbor at any level L' < L. Its logical
+                    #    is obtained by halving same_logical (L - L' times).
+                    found = False
+                    for L2 in reversed([lv for lv in levels if lv < L]):
+                        shift = L - L2
+                        coarser_logical = tuple(
+                            same_logical[kk] >> shift for kk in range(ndim))
+                        ckey = (L2, coarser_logical)
+                        if ckey in addr:
+                            jb = addr[ckey]
+                            sub = (self._sub_face_index_logical(
+                                       self.blocks[jb], block, dim)
+                                   if shift == 1 else None)
+                            block.neighbors[dim][side].append(
+                                (jb, COARSER, sub))
+                            found = True
+                            break
+                    if found:
+                        continue
+
+                    # 3) Finer neighbors — collect across ALL higher levels,
+                    #    since during enforce_2to1_balance a face can host
+                    #    level-(L+1) and level-(L+2) neighbors on disjoint
+                    #    transverse sub-regions simultaneously. The balance
+                    #    loop relies on seeing the deepest neighbors to
+                    #    drive cascade refinement.
+                    finer_here = []
+                    for L2 in [lv for lv in levels if lv > L]:
+                        shift = L2 - L
+                        shift_n = 1 << shift
+                        if side == 0:
+                            face_k = logical[k] * shift_n - 1
+                        else:
+                            face_k = (logical[k] + 1) * shift_n
+                        N_L2_d = N_at(L2, dim)
+                        if face_k < 0 or face_k >= N_L2_d:
+                            if self.bc[dim][side] == "periodic":
+                                face_k %= N_L2_d
+                            else:
+                                continue
+                        # Iterate transverse sub-positions at level L2.
+                        n_sub_lev = shift_n ** (ndim - 1)
+                        for sub_idx in range(n_sub_lev):
+                            fine_logical = [0] * ndim
+                            sub_k_counter = 0
+                            for kk, dd in enumerate(dim_keys):
+                                if dd == dim:
+                                    fine_logical[kk] = face_k
+                                    continue
+                                offset = ((sub_idx // (shift_n ** sub_k_counter))
+                                          % shift_n)
+                                fine_logical[kk] = logical[kk] * shift_n + offset
+                                sub_k_counter += 1
+                            fkey = (L2, tuple(fine_logical))
+                            if fkey in addr:
+                                jb = addr[fkey]
+                                report_sub = (sub_idx if shift == 1 else None)
+                                finer_here.append((jb, FINER, report_sub))
+                    if finer_here:
+                        block.neighbors[dim][side].extend(finer_here)
+                        continue
+
+                    # 4) Nothing found — domain boundary.
+                    block.neighbors[dim][side].append((None, BC, None))
+
+    def _sub_face_index_logical(self, coarse: MeshBlock, fine: MeshBlock,
+                                 dim: str) -> int:
+        """Like ``_sub_face_index`` but uses logical coords (avoiding the
+        physical-extent comparisons used by the legacy path)."""
+        dim_keys = list(self.dims.keys())
+        idx, stride = 0, 1
+        for d in self.dims:
+            if d == dim:
+                continue
+            # Fine logical at level L. Coarse logical at level L-1.
+            # Fine is in upper-half of coarse along dim d iff
+            # fine_logical[d] >= 2*coarse_logical[d] + 1 -> odd.
+            k_fine = dim_keys.index(d)
+            fine_k = fine.logical[k_fine]
+            coarse_k = coarse.logical[k_fine]
+            # fine_k corresponds to coarse_k as: fine_k = 2*coarse_k + bit.
+            bit = fine_k - 2 * coarse_k
+            idx += bit * stride
+            stride *= 2
+        return idx
 
     def _sub_face_index(self, coarse: MeshBlock, fine: MeshBlock, dim: str) -> int:
         """Which sub-face of `coarse` along `dim` does `fine` cover?
