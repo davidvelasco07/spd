@@ -81,6 +81,19 @@ def detect_troubles(self: Simulator):
 
     if self.blending:
         apply_blending(self,trouble,theta)
+        # apply_blending reads trouble (with filled ghost from fv_Boundaries
+        # above) and writes theta including theta's own ghost cells via the
+        # shifted cut(..) ops. Those ghost writes are local to each block
+        # and diverge from the neighbor's theta across block boundaries,
+        # which later biases affected_faces at those boundaries. Re-exchange
+        # theta via M_fv so its ghost cells reflect the neighbor block's
+        # post-blending theta.
+        self.dm.M_fv[...] = 0
+        # Active region of theta -> [nvar=1, Nb, cells_y, cells_x] (strip ghost).
+        active = self.crop(self.dm.theta, ngh=ngh)
+        self.fill_active_region(active)
+        self.fv_Boundaries(self.dm.M_fv, all=False)
+        theta[...] = self.dm.M_fv[0]
 
     for dim in self.dims:
         idim = self.dims[dim]
@@ -139,33 +152,41 @@ def compute_smooth_extrema(self, U, dim):
     return alphaL
 
 def apply_blending(self,trouble,theta):
+    # theta/trouble layout here is [Nb, cells_{...}]; prepend Ellipsis so
+    # the positional slice tuples hit the cell axes (not the Nb axis).
     a = slice(None,-1)
     b = slice( 1,None)
     cuts = [(a,a),(a,b),(b,a),(b,b)]
-    #First neighbors
+    #First neighbors (cut() already uses Ellipsis, safe for Nb axis)
     for idim in self.idims:
         theta[cut(None,-1,idim)] = np.maximum(.75*trouble[cut( 1,None,idim)],theta[cut(None,-1,idim)])
         theta[cut( 1,None,idim)] = np.maximum(.75*trouble[cut(None,-1,idim)],theta[cut( 1,None,idim)])
-          
+
     if self.ndim==2:
-        #Second neighbors
+        #Second neighbors (diagonal). Ellipsis absorbs the leading Nb axis.
         for i in range(len(cuts)):
-            theta[cuts[i]] = np.maximum(.5*trouble[cuts[::-1][i]],theta[cuts[i]])
-                
+            idx  = (Ellipsis,) + cuts[i]
+            idx2 = (Ellipsis,) + cuts[::-1][i]
+            theta[idx] = np.maximum(.5*trouble[idx2], theta[idx])
+
     elif self.ndim==3:
-        #Second neighbors
+        #Second neighbors: roll the 2-tuple across the 3 cell axes, Nb as batch.
         for i in range(len(cuts)):
             for idim in self.idims:
-                shape1 = tuple(np.roll(np.array((slice(None),)+cuts[ i]),-idim))
-                shape2 = tuple(np.roll(np.array((slice(None),)+cuts[::-1][-i]),-idim))
+                rolled1 = tuple(np.roll(np.array((slice(None),)+cuts[ i]),-idim))
+                rolled2 = tuple(np.roll(np.array((slice(None),)+cuts[::-1][-i]),-idim))
+                shape1 = (slice(None),) + rolled1   # Nb + 3 cells
+                shape2 = (slice(None),) + rolled2
                 theta[shape1] = np.maximum(.5*trouble[shape2],theta[shape1])
-        #Third neighbors
+        #Third neighbors: 3D diagonal; Nb as batch.
         cuts1 = [(x,y,z) for x in (a,b) for y in (a,b) for z in (a,b)]
         cuts2 = [(x,y,z) for x in (b,a) for y in (b,a) for z in (b,a)]
         for i in range(len(cuts)):
-            theta[cuts1[i]] = np.maximum(.375*trouble[cuts2[i]],theta[cuts1[i]])
-    
-    #Last layer
+            idx  = (Ellipsis,) + cuts1[i]
+            idx2 = (Ellipsis,) + cuts2[i]
+            theta[idx] = np.maximum(.375*trouble[idx2], theta[idx])
+
+    #Last layer (cut() Ellipsis-based, safe for Nb axis)
     for idim in self.idims:
         theta[cut(None,-1,idim)] = np.maximum(.25*(theta[cut( 1,None,idim)]>0),theta[cut(None,-1,idim)])
         theta[cut( 1,None,idim)] = np.maximum(.25*(theta[cut(None,-1,idim)]>0),theta[cut( 1,None,idim)])
