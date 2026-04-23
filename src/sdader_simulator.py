@@ -29,6 +29,10 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
                  min_P: float = 1e-10,
                  godunov: bool = False,
                  limiting_variables: list = [0],
+                 refine_fn=None,
+                 derefine_fn=None,
+                 adapt_interval: int = None,
+                 amr_max_level: int = None,
                  *args,
                  **kwargs):
         super().__init__(*args, **kwargs)
@@ -43,6 +47,14 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         self.min_P = min_P
         self.godunov = godunov
         self.limiting_variables = limiting_variables
+        # Dynamic AMR hooks. Can also be set/modified as plain attributes
+        # between steps. When ``adapt_interval`` is not None and at least
+        # one of refine_fn/derefine_fn is set, ``perform_update`` will tag
+        # and adapt after every ``adapt_interval`` steps.
+        self.refine_fn = refine_fn
+        self.derefine_fn = derefine_fn
+        self.adapt_interval = adapt_interval
+        self.amr_max_level = amr_max_level
 
         self.post_init()
         self.compute_dt()
@@ -375,6 +387,18 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
             self.dm.U_cv[...] += self.dm.U_eq_cv
         self.compute_primitives(self.dm.U_cv,W=self.dm.W_cv)
         self.time += self.dt
+        # Dynamic AMR: tag + adapt after the step completes so new children
+        # prolongate from the just-updated solution, not the pre-step state.
+        if (self.adapt_interval is not None
+                and self.n_step % self.adapt_interval == 0
+                and (self.refine_fn is not None or self.derefine_fn is not None)):
+            to_r, to_d = self.tag_blocks(
+                refine_fn=self.refine_fn,
+                derefine_fn=self.derefine_fn,
+                max_level=self.amr_max_level,
+            )
+            if to_r or to_d:
+                self.adapt(to_refine=to_r, to_derefine=to_d)
         return True
 
     def init_sim(self):
