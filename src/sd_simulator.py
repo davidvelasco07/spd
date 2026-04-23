@@ -55,12 +55,12 @@ class SD_Simulator(Simulator):
         self.dm.cv_to_sp = np.linalg.inv(self.dm.sp_to_cv)
         # AMR: coarse <-> fine solution-point transfer operators.
         self.dm.LM_prolong, self.dm.LM_restrict = build_transfer_matrices(self.x_sp)
-        # AMR: per-meshblock element size. Shape [Nb] per dim; broadcast over
-        # [nvar, (nader,) Nb, ...] when scaling the divergence operator.
-        self._refresh_block_metrics()
 
         self.mesh_cv = self.compute_mesh_cv()
         self.compute_positions()
+        # AMR: per-meshblock 1/h (SD) and per-block h_fp/h_cv (FV). Must run
+        # after compute_positions() has populated dm.d{dim}_fp / d{dim}_cv.
+        self._refresh_block_metrics()
     
     def compute_mesh_cv(self) -> np.ndarray:
         # Rank-global mesh (single block covering the whole per-rank domain).
@@ -353,19 +353,37 @@ class SD_Simulator(Simulator):
         return compute_A_from_B(M_fp,self.dm.dfp_to_sp,dim,self.ndim,**kwargs)
     
     def _refresh_block_metrics(self) -> None:
-        """Cache per-block 1/h[dim] with broadcastable shape over the SD
-        arrays [nvar, (nader,) Nb, cells, pts]."""
+        """Cache per-block 1/h[dim] for SD and rebuild per-block h_fp/h_cv
+        (for FV) with an Nb axis carrying 1/2**level scaling.
+
+        SD arrays layout: [nvar, (nader,) Nb, cells, pts]. _inv_h_block
+        shape [1, (1,) Nb, 1...1] (broadcastable over cells+pts).
+
+        FV arrays layout: [nvar, Nb, cells]. h_fp[dim] / h_cv[dim] are
+        rebuilt here to include the Nb axis so multi-level blocks broadcast
+        correctly in MUSCL and fv_apply_fluxes.
+        """
+        # SD per-block 1/h.
         self._inv_h_block = {}
         self._inv_h_block_ader = {}
         for dim in self.dims:
             arr = np.array([1.0 / b.h[dim] for b in self.forest.blocks])
-            # Non-ADER: [1, Nb, 1,1,1, 1,1,1] (ndim cells + ndim pts trailing).
             shape_na = (1,) + (-1,) + (1,) * (2 * self.ndim)
-            # ADER: add nader axis between nvar and Nb.
-            shape_a = (1, 1) + (-1,) + (1,) * (2 * self.ndim)
+            shape_a  = (1, 1) + (-1,) + (1,) * (2 * self.ndim)
             self._inv_h_block[dim] = arr.reshape(shape_na)
             self._inv_h_block_ader[dim] = arr.reshape(shape_a)
         self.h_min = min(b.h[d] for b in self.forest.blocks for d in self.dims)
+        # FV per-block h_fp / h_cv (Nb axis inserted after nvar; values
+        # scaled by 1/2**level so fine blocks see their actual physical h).
+        Nb = self.forest.Nblocks
+        level_factor = np.array(
+            [2.0 ** (-b.level) for b in self.forest.blocks]
+        ).reshape((1, Nb) + (1,) * self.ndim)
+        for dim in self.dims:
+            h_fp_l0 = self.dm.__getattribute__(f"d{dim}_fp")
+            h_cv_l0 = self.dm.__getattribute__(f"d{dim}_cv")
+            self.h_fp[dim] = h_fp_l0[:, np.newaxis, ...] * level_factor
+            self.h_cv[dim] = h_cv_l0[:, np.newaxis, ...] * level_factor
 
     def _inv_h(self, dim, ader):
         return (self._inv_h_block_ader if ader else self._inv_h_block)[dim]
