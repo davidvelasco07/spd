@@ -306,12 +306,14 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         for dim in self.dims:
             shift=self.dims[dim]
             shape=[self.nvar]+Nn
+            # FV path doesn't carry the Nb axis yet; assumes one meshblock.
+            Fd = self.F_ader_fp[dim][:,i_ader,0]
             self.F_faces[dim][cut(None,-1,shift)] = np.transpose(
-                self.F_ader_fp[dim][:,i_ader][cut(None,-1,shift)],dims[ndim-1]
+                Fd[cut(None,-1,shift)],dims[ndim-1]
                 ).reshape(shape)
             shape.pop(ndim-shift)
             self.F_faces[dim][indices(-1,shift)] = np.transpose(
-                self.F_ader_fp[dim][:,i_ader][indices2(-1,ndim,shift)],dims2[ndim-1]).reshape(shape)
+                Fd[indices2(-1,ndim,shift)],dims2[ndim-1]).reshape(shape)
     
     def correct_fluxes(self):
         for dim in self.dims:
