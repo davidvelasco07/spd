@@ -62,11 +62,14 @@ class FV_Simulator(Simulator):
         self.BC_fv = defaultdict(list)
 
         for dim in self.dims:
-            # faces / centers / h_fp / h_cv are kept as the per-block
-            # arrays produced by sd_simulator._refresh_block_metrics (they
-            # carry the Nb axis and the 1/2**level scaling for AMR). Do
-            # NOT overwrite them here with the rank-global level-0 d{dim}_fp
-            # / d{dim}_cv from the dm: that version has no Nb axis.
+            # Refresh h_fp / h_cv dict entries from dm so they track
+            # whichever location (host/device) dm currently holds: the
+            # per-block arrays were stashed on dm by
+            # sd_simulator._refresh_block_metrics as h_fp_nb_{dim} /
+            # h_cv_nb_{dim}. Do NOT use the rank-global d{dim}_fp /
+            # d{dim}_cv (those have no Nb axis).
+            self.h_fp[dim] = self.dm.__getattribute__(f"h_fp_nb_{dim}")
+            self.h_cv[dim] = self.dm.__getattribute__(f"h_cv_nb_{dim}")
             self.F_faces[dim] = self.dm.__getattribute__(f"F_faces_{dim}")
             self.F_faces_FB[dim] = self.dm.__getattribute__(f"F_faces_FB{dim}")
             self.MR_faces[dim] = self.dm.__getattribute__(f"MR_faces_{dim}")

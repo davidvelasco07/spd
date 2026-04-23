@@ -375,15 +375,24 @@ class SD_Simulator(Simulator):
         self.h_min = min(b.h[d] for b in self.forest.blocks for d in self.dims)
         # FV per-block h_fp / h_cv (Nb axis inserted after nvar; values
         # scaled by 1/2**level so fine blocks see their actual physical h).
+        # Store in dm so GPUDataManager moves them to device when use_cupy
+        # is on. self.h_fp/h_cv are refreshed from dm in create_dicts_fv
+        # so the dict entries always match the dm's current location.
         Nb = self.forest.Nblocks
         level_factor = np.array(
             [2.0 ** (-b.level) for b in self.forest.blocks]
         ).reshape((1, Nb) + (1,) * self.ndim)
         for dim in self.dims:
-            h_fp_l0 = self.dm.__getattribute__(f"d{dim}_fp")
-            h_cv_l0 = self.dm.__getattribute__(f"d{dim}_cv")
-            self.h_fp[dim] = h_fp_l0[:, np.newaxis, ...] * level_factor
-            self.h_cv[dim] = h_cv_l0[:, np.newaxis, ...] * level_factor
+            # Pull the level-0 arrays as numpy (they live on dm but we
+            # always do the host-side construction).
+            h_fp_l0 = self.dm.asnumpy(self.dm.__getattribute__(f"d{dim}_fp"))
+            h_cv_l0 = self.dm.asnumpy(self.dm.__getattribute__(f"d{dim}_cv"))
+            h_fp_nb = h_fp_l0[:, np.newaxis, ...] * level_factor
+            h_cv_nb = h_cv_l0[:, np.newaxis, ...] * level_factor
+            self.dm.__setattr__(f"h_fp_nb_{dim}", h_fp_nb)
+            self.dm.__setattr__(f"h_cv_nb_{dim}", h_cv_nb)
+            self.h_fp[dim] = self.dm.__getattribute__(f"h_fp_nb_{dim}")
+            self.h_cv[dim] = self.dm.__getattribute__(f"h_cv_nb_{dim}")
 
     def _inv_h(self, dim, ader):
         return (self._inv_h_block_ader if ader else self._inv_h_block)[dim]
