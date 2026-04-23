@@ -40,6 +40,7 @@ class Simulator:
                      ("periodic","periodic")),
         Nb: Tuple = None,
         forest_refine=None,
+        levels=None,
         verbose = True,
         available_time = 3600.0,
     ):
@@ -158,10 +159,19 @@ class Simulator:
         self.forest = BlockForest.uniform_grid(
             self.ndim, self.dims, self.lim, self.NB, self.Nblocks_per_dim, self.BC,
         )
-        # Optional static refinement hook. The callback receives the forest
-        # before SD arrays are allocated, so any refine_block / derefine_block
-        # calls simply widen the Nb axis at allocation time.
-        if forest_refine is not None:
+        # Optional static refinement. Two forms -- pick one:
+        #   `levels`: declarative list of {level, xmin/xmax, ymin/ymax, zmin/zmax}
+        #             regions. Each block is refined until it meets the target
+        #             level of every region it intersects.
+        #   `forest_refine`: low-level escape hatch; a callback receiving the
+        #             forest for arbitrary refine/derefine ops.
+        # Either produces a 2:1-balanced forest before SD arrays are allocated.
+        if levels is not None and forest_refine is not None:
+            raise ValueError("Pass either 'levels' or 'forest_refine', not both")
+        if levels is not None:
+            self.forest.refine_to_levels(levels)
+            self.forest.enforce_2to1_balance()
+        elif forest_refine is not None:
             forest_refine(self.forest)
             self.forest.enforce_2to1_balance()
 

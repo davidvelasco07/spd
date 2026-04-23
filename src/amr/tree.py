@@ -7,7 +7,9 @@ relations account for level differences, and the forest enforces 2:1
 balance (no two neighbors differ by more than one level).
 """
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+import math
 
 # Neighbor relation tags.
 SAME = "same"        # neighbor at the same refinement level
@@ -208,6 +210,47 @@ class BlockForest:
         return idx
 
     # ---------------------------------------------------- refine / derefine
+    def refine_to_levels(self, levels: List[Dict[str, Any]]) -> None:
+        """Iteratively refine until every block meets the target level
+        specified by one or more rectangular regions.
+
+        ``levels`` is a list of dicts, each describing one region:
+          * ``level``: target refinement level (int >= 0).
+          * ``xmin``, ``xmax``: physical bounds in x.
+          * ``ymin``, ``ymax``: optional (ignored for 1D).
+          * ``zmin``, ``zmax``: optional (ignored for 1D/2D).
+        Missing bounds default to +/- infinity in that dim (region covers
+        the whole axis). A block is refined to level ``L`` if it
+        intersects any region with ``level >= L``. Overlapping regions
+        stack via max. Does NOT enforce 2:1 balance -- call
+        ``enforce_2to1_balance()`` afterwards.
+        """
+        def target_level(block: MeshBlock) -> int:
+            target = 0
+            for spec in levels:
+                overlap = True
+                for d in self.dims:
+                    r_lo = spec.get(f"{d}min", -math.inf)
+                    r_hi = spec.get(f"{d}max",  math.inf)
+                    if block.lim[d][1] <= r_lo + _TOL or block.lim[d][0] >= r_hi - _TOL:
+                        overlap = False
+                        break
+                if overlap:
+                    target = max(target, int(spec["level"]))
+            return target
+
+        # Iteratively refine all blocks below target. Each outer iteration
+        # computes targets once, refines all qualifying blocks via
+        # refine_blocks (order-safe), then re-evaluates.
+        while True:
+            to_refine = [
+                ib for ib, b in enumerate(self.blocks)
+                if target_level(b) > b.level
+            ]
+            if not to_refine:
+                return
+            self.refine_blocks(to_refine)
+
     def refine_blocks(self, ibs: List[int]) -> List[int]:
         """Refine several blocks (convenience wrapper around `refine_block`).
 
