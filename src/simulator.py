@@ -6,6 +6,7 @@ from comms import CommHelper
 from initial_conditions_3d import sine_wave
 import hydro
 import mhd
+from amr.tree import BlockForest
 
 class Simulator:
     def __init__(
@@ -37,6 +38,7 @@ class Simulator:
         BC: Tuple = (("periodic","periodic"),
                      ("periodic","periodic"),
                      ("periodic","periodic")),
+        Nb: Tuple = None,
         verbose = True,
         available_time = 3600.0,
     ):
@@ -135,6 +137,27 @@ class Simulator:
             #print(self.comms.rank,dim,self.N[dim],self.len[dim],self.lim[dim])
         self.rank = self.comms.rank
 
+        # Block-based mesh forest. `Nb` is the per-meshblock element count per
+        # dim (athenaK convention). If None, defaults to `N` so the forest
+        # holds a single block covering the (per-rank) domain.
+        if Nb is None:
+            NB_per_dim = {dim: self.N[dim] for dim in self.dims}
+        else:
+            assert len(Nb) >= ndim, f"Nb must have at least ndim={ndim} entries"
+            NB_per_dim = {}
+            for idim in range(ndim):
+                dim = dims[idim]
+                assert self.N[dim] % Nb[idim] == 0, (
+                    f"N[{dim}]={self.N[dim]} is not divisible by Nb[{dim}]={Nb[idim]}")
+                NB_per_dim[dim] = Nb[idim]
+        self.NB = NB_per_dim
+        self.Nblocks_per_dim = {dim: self.N[dim] // self.NB[dim] for dim in self.dims}
+        for dim in "xyz":
+            self.__setattr__(f"N{dim}B", self.NB[dim] if dim in self.dims else 1)
+        self.forest = BlockForest.uniform_grid(
+            self.ndim, self.dims, self.lim, self.NB, self.Nblocks_per_dim, self.BC,
+        )
+
     def init_fields(self):
         self.variables = [r"$\rho$"]
         self._d_ = 0
@@ -188,6 +211,12 @@ class Simulator:
 
     def crop(self,M,ngh=1)->np.ndarray:
         return M[(slice(None),)+(slice(ngh,-ngh),)*self.ndim+(Ellipsis,)]
+
+    def crop_elements(self,M,ngh=1,ader=False)->np.ndarray:
+        # Crop ngh ghost elements on each of the ndim cell axes. Assumes SD
+        # layout [nvar, (nader,) Nb, Nz, Ny, Nx, ...point axes].
+        pre = 3 if ader else 2
+        return M[(slice(None),)*pre + (slice(ngh,-ngh),)*self.ndim + (Ellipsis,)]
 
     def compute_primitives(self,U,**kwargs)->np.ndarray:
         return self.equations.compute_primitives(

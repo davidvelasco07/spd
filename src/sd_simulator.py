@@ -57,6 +57,9 @@ class SD_Simulator(Simulator):
         self.compute_positions()
     
     def compute_mesh_cv(self) -> np.ndarray:
+        # Rank-global mesh (single block covering the whole per-rank domain).
+        # Kept for back-compat and visualization; IC eval uses per-block meshes
+        # from `compute_mesh_cv_block`.
         Nghe=self.Nghe
         Ns = [self.N[dim]+2*Nghe for dim in self.dims]
         shape = (self.ndim,)+tuple(Ns[::-1])+(self.p+2,)*self.ndim
@@ -69,6 +72,24 @@ class SD_Simulator(Simulator):
             shape1 = (None,)*(self.ndim-1-idim)+(slice(None),)+(None,)*(self.ndim+idim)
             shape2 = (None,)*(2*self.ndim-1-idim)+(slice(None),)+(None,)*(idim)
             mesh_cv[idim] = self.lim[dim][0]+(np.arange(N)[shape1]+self.fp[dim][shape2])*lenght/N-h
+        return mesh_cv
+
+    def compute_mesh_cv_block(self, block) -> np.ndarray:
+        """Per-meshblock control-volume mesh (shape matches compute_mesh_cv but
+        sized by NB[dim] and located within the block's physical extent)."""
+        Nghe = self.Nghe
+        Ns = [self.NB[dim] + 2*Nghe for dim in self.dims]
+        shape = (self.ndim,) + tuple(Ns[::-1]) + (self.p+2,)*self.ndim
+        mesh_cv = np.ndarray(shape)
+        for dim in self.dims:
+            idim = self.dims[dim]
+            N = Ns[idim]
+            h = block.h[dim]
+            lo, hi = block.lim[dim]
+            lenght = (hi - lo) + 2*Nghe*h
+            shape1 = (None,)*(self.ndim-1-idim)+(slice(None),)+(None,)*(self.ndim+idim)
+            shape2 = (None,)*(2*self.ndim-1-idim)+(slice(None),)+(None,)*(idim)
+            mesh_cv[idim] = lo + (np.arange(N)[shape1] + self.fp[dim][shape2])*lenght/N - h
         return mesh_cv
 
     def compute_mesh(self,Points) -> np.ndarray:
@@ -125,12 +146,16 @@ class SD_Simulator(Simulator):
         na = np.newaxis
         nvar = self.nvar
         ngh = self.Nghe
-        # This arrays contain Nghe layers of ghost elements
+        # W_gh layout: [nvar, Nb, NzB+2ngh, NyB+2ngh, NxB+2ngh, pz, py, px].
+        # Each meshblock's IC values are computed on that block's own physical
+        # mesh (so multi-block grids see position-dependent ICs correctly).
         W_gh = self.array_sp(ngh=ngh)
-        for var in range(nvar):
-            W_gh[var] = quadrature_mean(self.mesh_cv, self.init_fct, self.ndim, var)
+        for ib, block in enumerate(self.forest.blocks):
+            mesh_cv_b = self.compute_mesh_cv_block(block)
+            for var in range(nvar):
+                W_gh[var, ib] = quadrature_mean(mesh_cv_b, self.init_fct, self.ndim, var)
 
-        self.W_init_cv = self.crop(W_gh)
+        self.W_init_cv = self.crop_elements(W_gh)
         self.dm.W_cv = self.W_init_cv.copy()
         self.dm.W_sp = self.compute_sp_from_cv(self.dm.W_cv)
         self.dm.U_sp = self.compute_conservatives(self.dm.W_sp)
@@ -152,42 +177,47 @@ class SD_Simulator(Simulator):
         return W_r
     
     def transpose_to_fv(self,M):
-        #nvar,Nz,Ny,Nx,nz,ny,nx
-        #nvar,Nznz,Nyny,Nxnx
+        # [nvar, Nb, Nz, Ny, Nx, nz, ny, nx] -> [nvar, Nznz, Nyny, Nxnx].
+        # Phase 1b: Nb must be 1 at this boundary; block-tiled Nb>1 support
+        # will live in Phase 1c.
+        assert M.shape[1] == 1, (
+            f"transpose_to_fv: Nb={M.shape[1]}>1 not yet supported (Phase 1c)")
+        M = M[:,0]
         if self.ndim==1:
             assert M.ndim == 3
-            return M.reshape(M.shape[0],M.shape[1]*M.shape[2])   
+            return M.reshape(M.shape[0],M.shape[1]*M.shape[2])
         elif self.ndim==2:
             assert M.ndim == 5
-            return np.transpose(M,(0, 1,3, 2,4)).reshape(M.shape[0],M.shape[1]*M.shape[3],M.shape[2]*M.shape[4])  
+            return np.transpose(M,(0, 1,3, 2,4)).reshape(M.shape[0],M.shape[1]*M.shape[3],M.shape[2]*M.shape[4])
         else:
             assert M.ndim == 7
-            return np.transpose(M,(0, 1,4, 2,5, 3,6)).reshape(M.shape[0],M.shape[1]*M.shape[4],M.shape[2]*M.shape[5],M.shape[3]*M.shape[6])   
+            return np.transpose(M,(0, 1,4, 2,5, 3,6)).reshape(M.shape[0],M.shape[1]*M.shape[4],M.shape[2]*M.shape[5],M.shape[3]*M.shape[6])
 
     def transpose_to_sd(self, M):
-        #nvar,Nznz,Nyny,Nxnx
-        #nvar,Nz,Ny,Nx,nz,ny,nx
+        # [nvar, Nznz, Nyny, Nxnx] -> [nvar, Nb=1, Nz, Ny, Nx, nz, ny, nx].
         shape=[]
         for dim in self.dims:
             shape+=[self.n[dim],self.N[dim]]
         shape=[M.shape[0]]+shape[::-1]
         if self.ndim==1:
-            return M.reshape(shape)   
+            out = M.reshape(shape)
         elif self.ndim==2:
-            return np.transpose(M.reshape(shape)
-                                ,(0, 1,3, 2,4))
+            out = np.transpose(M.reshape(shape),(0, 1,3, 2,4))
         else:
-            return np.transpose(M.reshape(shape),
-                                (0, 1,3,5, 2,4,6))
+            out = np.transpose(M.reshape(shape),(0, 1,3,5, 2,4,6))
+        return out[:,np.newaxis]
     
     def array(self,px,py,pz,ngh=0,ader=False,nvar=None) -> np.ndarray:
+        # Layout: [nvar, (nader,) Nb, NzB, NyB, NxB, pz, py, px]. NzB/NyB/NxB
+        # are per-meshblock element counts; Nb = number of meshblocks.
         if type(nvar) == type(None):
             nvar = self.nvar
         shape = [nvar,self.nader] if ader else [nvar]
+        shape += [self.forest.Nblocks]
         N = []
         for dim in self.dims:
-            N.append(self.N[dim]+2*ngh)
-        N = N[::-1] 
+            N.append(self.NB[dim]+2*ngh)
+        N = N[::-1]
         p = [px,py,pz][:self.ndim][::-1]
         return np.ndarray(shape+N+p)
         
@@ -209,10 +239,11 @@ class SD_Simulator(Simulator):
     
     def array_RS(self,dim="x",dim2=None,ader=False)->np.ndarray:
         shape = [self.nvar,self.nader] if ader else [self.nvar]
+        shape += [self.forest.Nblocks]
         N = []
         for odim in self.dims:
-            N.append(self.N[odim]+(odim==dim))
-        shape += N[::-1] 
+            N.append(self.NB[odim]+(odim==dim))
+        shape += N[::-1]
         if self.ndim>2:
             if (dim2 == "x") or (dim2== "y" and dim=="x"):
                 shape += [self.p+2]
@@ -228,14 +259,15 @@ class SD_Simulator(Simulator):
     
     def array_BC(self,dim="x",dim2=None,ader=False)->np.ndarray:
         shape = [2,self.nvar,self.nader] if ader else [2,self.nvar]
+        shape += [self.forest.Nblocks]
         if self.Z:
             if dim=="x" or dim=="y":
-                shape += [self.N["z"]]
+                shape += [self.NB["z"]]
         if self.Y:
             if dim=="x" or dim=="z":
-                shape += [self.N["y"]]
+                shape += [self.NB["y"]]
         if dim=="y" or dim=="z":
-            shape += [self.N["x"]]
+            shape += [self.NB["x"]]
         if self.Z:
             if dim2=="x" or (dim2=="y" and dim=="x"):
                 shape += [self.p+2]

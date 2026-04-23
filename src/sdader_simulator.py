@@ -120,16 +120,16 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
 
     def ader_string(self)->str:
         """
-        Returns a string to be used in the
-        einsum performed to compute the ADER update.
-        The string length depends on the dimensions
+        Einsum index string for ADER updates. Covers the Nb (b) axis, the
+        ndim cell axes (z,y,x), and the ndim point axes (k,j,i).
+        Layout: [nvar, nader, Nb, (Nz,) (Ny,) Nx, (pz,) (py,) px].
         """
         if self.ndim==3:
-            return "zyxkji"
+            return "bzyxkji"
         elif self.ndim==2:
-            return "yxji"
+            return "byxji"
         else:
-            return "xi"
+            return "bxi"
 
     def ader_dudt(self):
         dUdt = self.compute_sp_from_dfp_x()
