@@ -179,22 +179,62 @@ class SD_Simulator(Simulator):
         W_r = compute_A_from_B_full(W,m,self.ndim)
         return W_r
     
-    def transpose_to_fv(self,M):
-        # [nvar, Nb, Nz, Ny, Nx, nz, ny, nx] -> [nvar, Nznz, Nyny, Nxnx].
-        # Phase 1b: Nb must be 1 at this boundary; block-tiled Nb>1 support
-        # will live in Phase 1c.
-        assert M.shape[1] == 1, (
-            f"transpose_to_fv: Nb={M.shape[1]}>1 not yet supported (Phase 1c)")
-        M = M[:,0]
+    def block_to_fv(self, M_block):
+        """Per-block SD layout -> per-block flat FV layout.
+
+        Input  (ndim=3): [..., NzB, NyB, NxB, pz, py, px]
+        Output (ndim=3): [..., NzB*pz, NyB*py, NxB*px]
+        """
         if self.ndim==1:
-            assert M.ndim == 3
-            return M.reshape(M.shape[0],M.shape[1]*M.shape[2])
+            s = M_block.shape
+            return M_block.reshape(s[:-2] + (s[-2]*s[-1],))
         elif self.ndim==2:
-            assert M.ndim == 5
-            return np.transpose(M,(0, 1,3, 2,4)).reshape(M.shape[0],M.shape[1]*M.shape[3],M.shape[2]*M.shape[4])
+            s = M_block.shape
+            return np.transpose(
+                M_block,
+                tuple(range(M_block.ndim-4)) + (M_block.ndim-4, M_block.ndim-2,
+                                                M_block.ndim-3, M_block.ndim-1)
+            ).reshape(s[:-4] + (s[-4]*s[-2], s[-3]*s[-1]))
         else:
-            assert M.ndim == 7
-            return np.transpose(M,(0, 1,4, 2,5, 3,6)).reshape(M.shape[0],M.shape[1]*M.shape[4],M.shape[2]*M.shape[5],M.shape[3]*M.shape[6])
+            s = M_block.shape
+            lead = M_block.ndim - 6
+            perm = tuple(range(lead)) + (lead, lead+3,
+                                         lead+1, lead+4,
+                                         lead+2, lead+5)
+            return np.transpose(M_block, perm).reshape(
+                s[:-6] + (s[-6]*s[-3], s[-5]*s[-2], s[-4]*s[-1])
+            )
+
+    def transpose_to_fv(self,M):
+        """[nvar, Nb, NzB, NyB, NxB, pz, py, px] -> [nvar, Nz*pz, Ny*py, Nx*px].
+
+        Multi-block uniform-level: each block is flattened and placed in its
+        rank-global slab determined by block.logical. AMR (mixed levels)
+        cannot tile a single flat array; use per-block plotting instead.
+        """
+        Nb = M.shape[1]
+        if Nb == 1:
+            return self.block_to_fv(M[:,0])
+        # Uniform-level assembly.
+        levels = {b.level for b in self.forest.blocks}
+        assert levels == {0}, (
+            "transpose_to_fv expects all blocks at level 0 (mixed-level "
+            "AMR: iterate per-block with plot_field instead)")
+        nvar = M.shape[0]
+        n = self.p + 1
+        dim_keys = list(self.dims.keys())            # ['x'] / ['x','y'] / ['x','y','z']
+        # Output shape: [nvar, (Nz*n,) (Ny*n,) Nx*n] — reverse for row-major z,y,x.
+        out_shape = [nvar] + [self.N[d]*n for d in reversed(dim_keys)]
+        out = np.empty(out_shape)
+        for ib, block in enumerate(self.forest.blocks):
+            M_b_flat = self.block_to_fv(M[:, ib])
+            slabs = [slice(None)]                     # nvar
+            for d in reversed(dim_keys):
+                i_log = block.logical[dim_keys.index(d)]
+                w = self.NB[d] * n
+                slabs.append(slice(i_log*w, (i_log+1)*w))
+            out[tuple(slabs)] = M_b_flat
+        return out
 
     def transpose_to_sd(self, M):
         # [nvar, Nznz, Nyny, Nxnx] -> [nvar, Nb=1, Nz, Ny, Nx, nz, ny, nx].
