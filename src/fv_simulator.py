@@ -55,10 +55,11 @@ class FV_Simulator(Simulator):
         self.MR_faces = defaultdict(list)
         self.ML_faces = defaultdict(list)
         self.BC_fv = defaultdict(list)
-        
+
         for dim in self.dims:
-            self.faces[dim] = self.dm.__getattribute__(f"{dim.upper()}_fp")
-            self.centers[dim] = self.dm.__getattribute__(f"{dim.upper()}_cv")
+            # faces / centers / h_fp / h_cv were set per-block by
+            # sd_simulator.compute_positions; do not overwrite them with the
+            # rank-global X_fp / X_cv (which are kept for viz).
             self.h_fp[dim] = self.dm.__getattribute__(f"d{dim}_fp")
             self.h_cv[dim] = self.dm.__getattribute__(f"d{dim}_cv")
             self.F_faces[dim] = self.dm.__getattribute__(f"F_faces_{dim}")
@@ -225,40 +226,64 @@ class FV_Simulator(Simulator):
              M: np.ndarray,
              dim: str,
              all: bool = True) -> None:
+        """Populate BC_fv[dim][side, ..., ib, ...] per block via the forest
+        neighbor table. Same dispatch convention as store_BC for SD:
+        SAME neighbors (including periodic self-wrap) copy a slab of the
+        neighbor block; BC-tagged sides apply reflective / gradfree / ic /
+        pressure / eq semantics.
         """
-        Stores the solution of ngh layers in the active region
-        """    
-        na=np.newaxis
+        from amr.tree import SAME, FINER, COARSER, BC as BC_TAG
+        na = np.newaxis
         idim = self.dims[dim]
-        ngh=self.Nghc
+        ngh = self.Nghc
         BC = self.BC[dim]
-        cuts=(cut(-2*ngh,  -ngh,idim),
-              cut(   ngh, 2*ngh,idim))
-        for side in [0,1]:
-            if  BC[side] == "periodic":
-                self.BC_fv[dim][side] = M[cuts[side]]
-            elif BC[side] == "reflective":
-                if all:
-                    self.BC_fv[dim][side] = M[cuts[1-side]]
-                    self.BC_fv[dim][side][self.vels[idim]] *= -1
-            elif BC[side] == "gradfree":
-                if all:
-                    self.BC_fv[dim][side] = M[cuts[1-side]]
-            elif BC[side] == "ic":
-                next
-            elif BC[side] == "pressure":
-                next
-            elif BC[side] == "eq":
-                if all:
-                    self.BC_fv[dim][side][...] = 0
-            else:
-                raise("Undetermined boundary type")
-                         
+        # For side=0 (left ghost slab of ib): pull the RIGHT-interior slab
+        # of the neighbor block -> M[..., jb, ..., -2*ngh:-ngh, ...].
+        # For side=1 (right ghost slab of ib): pull the LEFT-interior slab
+        # of the neighbor block -> M[..., jb, ..., ngh:2*ngh, ...].
+        interior_cuts = (cut(-2*ngh, -ngh, idim),
+                         cut(ngh, 2*ngh, idim))
+        # `M` has layout [nvar, Nb, ...cells with ghosts...]; pick a block
+        # by indexing position 1 (after nvar). BC_fv has an extra leading
+        # 'side' axis already consumed via [side], so the block axis is
+        # at position 1 there too after the side slice.
+        def _view(arr, ib, n):
+            return arr[(slice(None),)*n + (ib,)]
+
+        for ib, block in enumerate(self.forest.blocks):
+            for side in (0, 1):
+                entries = block.neighbors[dim][side]
+                bc_slot = _view(self.BC_fv[dim][side], ib, 1)
+                if len(entries) == 1 and entries[0][1] == SAME:
+                    jb, _rel, _sub = entries[0]
+                    src = _view(M, jb, 1)
+                    bc_slot[...] = src[interior_cuts[side]]
+                elif len(entries) == 1 and entries[0][1] == BC_TAG:
+                    if BC[side] == "reflective":
+                        if all:
+                            src = _view(M, ib, 1)
+                            bc_slot[...] = src[interior_cuts[1-side]]
+                            bc_slot[self.vels[idim]] *= -1
+                    elif BC[side] == "gradfree":
+                        if all:
+                            src = _view(M, ib, 1)
+                            bc_slot[...] = src[interior_cuts[1-side]]
+                    elif BC[side] in ("ic", "pressure"):
+                        pass   # BC_fv left as-is / pre-populated by caller
+                    elif BC[side] == "eq":
+                        if all:
+                            bc_slot[...] = 0
+                    else:
+                        raise ValueError(f"Undetermined boundary type: {BC[side]}")
+                else:
+                    rels = [e[1] for e in entries]
+                    raise NotImplementedError(
+                        f"Coarse-fine FV boundary not supported yet "
+                        f"(ib={ib}, dim={dim}, side={side}, rels={rels}).")
+
     def fv_apply_BC(self,
                  dim: str) -> None:
-        """
-        Fills ghost cells in M_fv
-        """
+        """Copy BC_fv[dim][side] into the ghost slabs of M_fv."""
         ngh=self.Nghc
         idim = self.dims[dim]
         self.dm.M_fv[cut(None, ngh,idim)] = self.BC_fv[dim][0]

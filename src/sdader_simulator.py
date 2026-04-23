@@ -280,18 +280,19 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
     ## Finite volume
     ####################
     def array_FV(self,n,nvar,dim=None,ngh=0)->np.ndarray:
-        shape = [nvar] 
+        # Per-meshblock FV layout: [nvar, Nb, NzB*n+2ngh, NyB*n+2ngh, NxB*n+2ngh(+1 on face-axis)].
+        shape = [nvar, self.forest.Nblocks]
         N=[]
         for dim2 in self.dims:
-            N.append(self.N[dim2]*n+(dim==dim2)+2*ngh)
+            N.append(self.NB[dim2]*n+(dim==dim2)+2*ngh)
         return np.ndarray(shape+N[::-1])
-    
+
     def array_FV_BC(self,dim="x")->np.ndarray:
-        shape = [2,self.nvar]
+        shape = [2, self.nvar, self.forest.Nblocks]
         ngh=self.Nghc
         N=[]
         for dim2 in self.dims:
-            N.append(self.N[dim2]*self.n[dim2]+2*ngh if dim!=dim2 else ngh)
+            N.append(self.NB[dim2]*self.n[dim2]+2*ngh if dim!=dim2 else ngh)
         return np.ndarray(shape+N[::-1])
 
     def switch_to_finite_volume(self):
@@ -318,18 +319,34 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
 
     def store_high_order_fluxes(self,i_ader):
         ndim=self.ndim
-        dims  = [(0,1,2),(0,1,3,2,4),(0,1,4,2,5,3,6)]
-        dims2 = [(0),(0,1,2),(0,1,3,2,4)]
-        Nn = [self.N[dim]*self.n[dim] for dim in self.dims][::-1]
+        # Transpose tuples now include the leading (nvar, Nb) batch axes.
+        # Original single-batch (nvar only) tuples for 1D/2D/3D:
+        #   1D: (0,1,2)          -- [nvar, Nx, px]          -> no change
+        #   2D: (0,1,3,2,4)      -- interleave cells + points
+        #   3D: (0,1,4,2,5,3,6)
+        # With Nb inserted at axis 1, shift everything after 0 by +1:
+        dims  = [(0,1,2,3),
+                 (0,1,2,4,3,5),
+                 (0,1,2,5,3,6,4,7)]
+        # `indices2` keeps only Nx-last-element + px-last-pt; result has
+        # one fewer cell axis. Old dims2:
+        #   1D: (0)               -- [nvar] (scalar)
+        #   2D: (0,1,2)           -- [nvar, Ny, py]
+        #   3D: (0,1,3,2,4)
+        # Shift by +1 for Nb:
+        dims2 = [(0,1),
+                 (0,1,2,3),
+                 (0,1,2,4,3,5)]
+        Nb = self.forest.Nblocks
+        Nn = [self.NB[dim]*self.n[dim] for dim in self.dims][::-1]
         for dim in self.dims:
             shift=self.dims[dim]
-            shape=[self.nvar]+Nn
-            # FV path doesn't carry the Nb axis yet; assumes one meshblock.
-            Fd = self.F_ader_fp[dim][:,i_ader,0]
+            shape=[self.nvar, Nb]+Nn
+            Fd = self.F_ader_fp[dim][:,i_ader]                # [nvar, Nb, ...cells, ...pts]
             self.F_faces[dim][cut(None,-1,shift)] = np.transpose(
                 Fd[cut(None,-1,shift)],dims[ndim-1]
                 ).reshape(shape)
-            shape.pop(ndim-shift)
+            shape.pop(ndim-shift+1)                            # +1 for the Nb axis
             self.F_faces[dim][indices(-1,shift)] = np.transpose(
                 Fd[indices2(-1,ndim,shift)],dims2[ndim-1]).reshape(shape)
     

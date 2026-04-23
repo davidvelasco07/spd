@@ -227,7 +227,8 @@ class Simulator:
         return [np.linspace(lim[dim][0],lim[dim][1],N[dim]*n[dim]) for dim in self.dims]
 
     def crop(self,M,ngh=1)->np.ndarray:
-        return M[(slice(None),)+(slice(ngh,-ngh),)*self.ndim+(Ellipsis,)]
+        # Arrays have [nvar, Nb, ...cells...]; skip both leading batch axes.
+        return M[(slice(None),)*2+(slice(ngh,-ngh),)*self.ndim+(Ellipsis,)]
 
     def crop_elements(self,M,ngh=1,ader=False)->np.ndarray:
         # Crop ngh ghost elements on each of the ndim cell axes. Assumes SD

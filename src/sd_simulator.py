@@ -135,18 +135,30 @@ class SD_Simulator(Simulator):
             fp[-ngh:] =  fp[-(ngh+1)] + fp[ngh+1:2*ngh+1]
             self.dm.__setattr__(f"{dim.upper()}_fp",fp)
             self.faces[dim] = fp
-            #Cell centers 
+            #Cell centers (rank-global).
             cv = 0.5*(fp[1:]+fp[:-1])
             self.dm.__setattr__(f"{dim.upper()}_cv",cv)
-            self.centers[dim] = cv
-            #Distance between faces
-            h_fp = (fp[1:]-fp[:-1])[self.shape(idim)]
-            self.dm.__setattr__(f"d{dim}_fp",h_fp)
+            #Per-block flux-point positions (one block's worth, same for every
+            #block at level 0 since h is uniform). h_fp/h_cv have the length
+            #NB[dim]*n + 2*ngh (+1 for fp) so FV ops align with the per-block
+            #Nb-axis FV arrays.
+            fp_b = np.ndarray((self.NB[dim] * self.n[dim] + ngh*2 + 1))
+            fp_b[ngh:-ngh] = (self.h[dim]*np.hstack((
+                np.arange(self.NB[dim]).repeat(self.n[dim]) +
+                np.tile(self.fp[dim][:-1], self.NB[dim]), self.NB[dim])))
+            fp_b[:ngh] = -fp_b[(ngh+1):(2*ngh+1)][::-1]
+            fp_b[-ngh:] = fp_b[-(ngh+1)] + fp_b[ngh+1:2*ngh+1]
+            cv_b = 0.5*(fp_b[1:] + fp_b[:-1])
+            #Distance between faces (per-block).
+            h_fp = (fp_b[1:] - fp_b[:-1])[self.shape(idim)]
+            self.dm.__setattr__(f"d{dim}_fp", h_fp)
             self.h_fp[dim] = h_fp
-            #Distance between centers
-            h_cv = (cv[1:]-cv[:-1])[self.shape(idim)]
-            self.dm.__setattr__(f"d{dim}_cv",h_cv)
+            #Distance between centers (per-block).
+            h_cv = (cv_b[1:] - cv_b[:-1])[self.shape(idim)]
+            self.dm.__setattr__(f"d{dim}_cv", h_cv)
             self.h_cv[dim] = h_cv
+            #Per-block cell-center positions (used by trouble_detection).
+            self.centers[dim] = cv_b
         
     def post_init(self) -> None:
         na = np.newaxis
@@ -209,49 +221,42 @@ class SD_Simulator(Simulator):
             )
 
     def transpose_to_fv(self,M):
-        """[nvar, Nb, NzB, NyB, NxB, pz, py, px] -> [nvar, Nz*pz, Ny*py, Nx*px].
+        """[nvar, Nb, NzB, NyB, NxB, pz, py, px] -> [nvar, Nb, NzB*pz, NyB*py, NxB*px].
 
-        Multi-block uniform-level: each block is flattened and placed in its
-        rank-global slab determined by block.logical. AMR (mixed levels)
-        cannot tile a single flat array; use per-block plotting instead.
+        Preserves the meshblock axis so FV code can operate per-block with
+        Nb as a batch dim. `block_to_fv` handles the per-block reshape and
+        absorbs any leading batch axes (here nvar + Nb) via its ellipsis
+        transpose rules.
         """
-        Nb = M.shape[1]
-        if Nb == 1:
-            return self.block_to_fv(M[:,0])
-        # Uniform-level assembly.
-        levels = {b.level for b in self.forest.blocks}
-        assert levels == {0}, (
-            "transpose_to_fv expects all blocks at level 0 (mixed-level "
-            "AMR: iterate per-block with plot_field instead)")
-        nvar = M.shape[0]
-        n = self.p + 1
-        dim_keys = list(self.dims.keys())            # ['x'] / ['x','y'] / ['x','y','z']
-        # Output shape: [nvar, (Nz*n,) (Ny*n,) Nx*n] — reverse for row-major z,y,x.
-        out_shape = [nvar] + [self.N[d]*n for d in reversed(dim_keys)]
-        out = np.empty(out_shape)
-        for ib, block in enumerate(self.forest.blocks):
-            M_b_flat = self.block_to_fv(M[:, ib])
-            slabs = [slice(None)]                     # nvar
-            for d in reversed(dim_keys):
-                i_log = block.logical[dim_keys.index(d)]
-                w = self.NB[d] * n
-                slabs.append(slice(i_log*w, (i_log+1)*w))
-            out[tuple(slabs)] = M_b_flat
-        return out
+        return self.block_to_fv(M)
 
     def transpose_to_sd(self, M):
-        # [nvar, Nznz, Nyny, Nxnx] -> [nvar, Nb=1, Nz, Ny, Nx, nz, ny, nx].
-        shape=[]
+        """[nvar, Nb, NzB*nz, NyB*ny, NxB*nx] -> [nvar, Nb, NzB, NyB, NxB, nz, ny, nx].
+
+        Inverse of transpose_to_fv (block_to_fv). Keeps the Nb axis intact.
+        """
+        nvar, Nb = M.shape[0], M.shape[1]
+        shape = [nvar, Nb]
         for dim in self.dims:
-            shape+=[self.n[dim],self.N[dim]]
-        shape=[M.shape[0]]+shape[::-1]
-        if self.ndim==1:
-            out = M.reshape(shape)
-        elif self.ndim==2:
-            out = np.transpose(M.reshape(shape),(0, 1,3, 2,4))
+            shape += [self.NB[dim], self.n[dim]]
+        # Reverse (z,y,x) ordering — last dim is x which is innermost.
+        # For a 3D input [nvar, Nb, Nz*nz, Ny*ny, Nx*nx]:
+        #   shape = [nvar, Nb, NzB, nz, NyB, ny, NxB, nx]  interpreted with
+        #   strides s.t. NzB is outer, nz is inner, etc.
+        shape_ordered = [nvar, Nb]
+        for dim in list(self.dims.keys())[::-1]:   # z, y, x outer->inner
+            shape_ordered += [self.NB[dim], self.n[dim]]
+        reshaped = M.reshape(shape_ordered)
+        if self.ndim == 1:
+            return reshaped
+        elif self.ndim == 2:
+            # axes: 0:nvar, 1:Nb, 2:NyB, 3:ny, 4:NxB, 5:nx
+            # target: [nvar, Nb, NyB, NxB, ny, nx] = (0, 1, 2, 4, 3, 5)
+            return np.transpose(reshaped, (0, 1, 2, 4, 3, 5))
         else:
-            out = np.transpose(M.reshape(shape),(0, 1,3,5, 2,4,6))
-        return out[:,np.newaxis]
+            # 3D axes: 0:nvar, 1:Nb, 2:NzB, 3:nz, 4:NyB, 5:ny, 6:NxB, 7:nx
+            # target: [nvar, Nb, NzB, NyB, NxB, nz, ny, nx] = (0,1,2,4,6,3,5,7)
+            return np.transpose(reshaped, (0, 1, 2, 4, 6, 3, 5, 7))
     
     def array(self,px,py,pz,ngh=0,ader=False,nvar=None) -> np.ndarray:
         # Layout: [nvar, (nader,) Nb, NzB, NyB, NxB, pz, py, px]. NzB/NyB/NxB
