@@ -363,15 +363,23 @@ class SD_Simulator(Simulator):
         rebuilt here to include the Nb axis so multi-level blocks broadcast
         correctly in MUSCL and fv_apply_fluxes.
         """
-        # SD per-block 1/h.
+        # SD per-block 1/h. Stored on dm so GPUDataManager moves them to
+        # device when use_cupy is on; self._inv_h_block(_ader) dicts are
+        # refreshed against dm in create_dicts so they track host/device.
         self._inv_h_block = {}
         self._inv_h_block_ader = {}
         for dim in self.dims:
             arr = np.array([1.0 / b.h[dim] for b in self.forest.blocks])
             shape_na = (1,) + (-1,) + (1,) * (2 * self.ndim)
             shape_a  = (1, 1) + (-1,) + (1,) * (2 * self.ndim)
-            self._inv_h_block[dim] = arr.reshape(shape_na)
-            self._inv_h_block_ader[dim] = arr.reshape(shape_a)
+            self.dm.__setattr__(f"inv_h_block_{dim}",
+                                arr.reshape(shape_na))
+            self.dm.__setattr__(f"inv_h_block_ader_{dim}",
+                                arr.reshape(shape_a))
+            self._inv_h_block[dim] = self.dm.__getattribute__(
+                f"inv_h_block_{dim}")
+            self._inv_h_block_ader[dim] = self.dm.__getattribute__(
+                f"inv_h_block_ader_{dim}")
         self.h_min = min(b.h[d] for b in self.forest.blocks for d in self.dims)
         # FV per-block h_fp / h_cv (Nb axis inserted after nvar; values
         # scaled by 1/2**level so fine blocks see their actual physical h).

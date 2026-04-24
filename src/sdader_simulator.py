@@ -129,6 +129,12 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
                 for dim in self.dims:
                     self.__getattribute__(name)[dim] = self.dm.__getattribute__(f"{name}_{dim}")
 
+        # Per-block 1/h metrics also live on dm (GPU-managed); refresh the
+        # dict entries so they point at dm's current-location copy.
+        for dim in self.dims:
+            self._inv_h_block[dim] = self.dm.__getattribute__(f"inv_h_block_{dim}")
+            self._inv_h_block_ader[dim] = self.dm.__getattribute__(f"inv_h_block_ader_{dim}")
+
         if self.update=="FV":
             self.create_dicts_fv()
 
