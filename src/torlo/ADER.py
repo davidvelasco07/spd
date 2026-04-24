@@ -1,10 +1,10 @@
 import numpy as np
 from mpmath import mp
-from precision_mp import precision
-from quadrature_mp import equispaced, lobatto, legendre
-from quadrature_mp import orthogonal_legendre_polynomials, derivative_orthogonal_legendre_polynomials
-from quadrature_mp import lagrange_basis, lagrange_deriv
-from quadrature_mp import convert_mp_2_np
+from .precision_mp import precision
+from .quadrature_mp import equispaced, lobatto, legendre
+from .quadrature_mp import orthogonal_legendre_polynomials, derivative_orthogonal_legendre_polynomials
+from .quadrature_mp import lagrange_basis, lagrange_deriv
+from .quadrature_mp import convert_mp_2_np
 mp.dps=precision
 
 class ADER:

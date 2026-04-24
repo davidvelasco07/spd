@@ -1,7 +1,7 @@
 from mpmath import mp
-from  precision_mp import precision
-from  lobatto_quadrature import get_quadrature as lobatto_quadrature
-from  legendre_quadrature import get_quadrature as legendre_quadrature
+from .precision_mp import precision
+from .lobatto_quadrature import get_quadrature as lobatto_quadrature
+from .legendre_quadrature import get_quadrature as legendre_quadrature
 import numpy as np
 
 mp.dps=precision
@@ -162,12 +162,15 @@ def lagrange_deriv(nodes,x,k):
     return f
 
 def sort_quad(nodes,weights):
-    idxs = np.argsort(nodes)
+    # argsort on (n,1) arrays is 2D; idxs[i] must be a Python int for mpmath indexing
+    col = np.array([nodes[i, 0] for i in range(nodes.rows)], dtype=float)
+    idxs = np.argsort(col)
     nodes_new = mp.zeros(nodes.rows,nodes.cols)
     weights_new = mp.zeros(weights.rows,weights.cols)
     for i in range(len(nodes)):
-        nodes_new[i] = nodes[idxs[i],0]
-        weights_new[i] = weights[idxs[i],0]
+        j = int(idxs[i])
+        nodes_new[i] = nodes[j, 0]
+        weights_new[i] = weights[j, 0]
     return nodes_new, weights_new
 
 def lobatto(n):
