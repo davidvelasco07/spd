@@ -158,7 +158,10 @@ class SD_Simulator(Simulator):
             self.dm.__setattr__(f"d{dim}_cv", h_cv)
             self.h_cv[dim] = h_cv
             #Per-block cell-center positions (used by trouble_detection).
-            self.centers[dim] = cv_b
+            #Stash on dm so GPUDataManager moves it to device under cupy;
+            #create_dicts_fv refreshes the dict entry.
+            self.dm.__setattr__(f"centers_{dim}", cv_b)
+            self.centers[dim] = self.dm.__getattribute__(f"centers_{dim}")
         
     def post_init(self) -> None:
         na = np.newaxis
