@@ -15,6 +15,12 @@ roundoff for any polynomial data of degree <= p (i.e., all SD solutions).
 """
 from typing import Tuple
 import numpy as np
+try:
+    import cupy as cp
+    CUPY_AVAILABLE = True
+except Exception:
+    cp = None
+    CUPY_AVAILABLE = False
 
 from polynomials import lagrange_matrix
 from polynomials import intfromsol_matrix
@@ -112,6 +118,9 @@ def _restrict_blocks_overlap(
     ndim: int,
 ) -> np.ndarray:
     """Side-aware overlap restriction to coarse CV representation."""
+    xp = np
+    if CUPY_AVAILABLE and isinstance(W_fine, cp.ndarray):
+        xp = cp
     lead = W_fine.ndim - 1 - 2 * ndim
     n = R_side[0].shape[0]
     NB = list(W_fine.shape[lead + 1:lead + 1 + ndim])
@@ -132,7 +141,7 @@ def _restrict_blocks_overlap(
     merged = list(Wf.shape[:lead]) + [2 * nb for nb in NB] + [n] * ndim
     Wf = Wf.reshape(merged)
 
-    out = np.zeros(Wf.shape[:lead] + tuple(NB) + (n,) * ndim, dtype=W_fine.dtype)
+    out = xp.zeros(Wf.shape[:lead] + tuple(NB) + (n,) * ndim, dtype=W_fine.dtype)
     dims = ("x", "y", "z")
     # 4) Gather parity subsets (fine element parity per dim), apply side-aware
     #    point restriction, and accumulate contributions into coarse CVs.
@@ -145,7 +154,10 @@ def _restrict_blocks_overlap(
         contrib = Wf[(slice(None),) * lead + cell_sel + (Ellipsis,)]
         for k in range(ndim):
             side = (sub_idx >> k) & 1
-            contrib = compute_A_from_B(contrib, R_side[side], dims[k], ndim)
+            Rk = R_side[side]
+            if CUPY_AVAILABLE and xp is cp and not isinstance(Rk, cp.ndarray):
+                Rk = cp.asarray(Rk)
+            contrib = compute_A_from_B(contrib, Rk, dims[k], ndim)
         out += contrib
     return out
 

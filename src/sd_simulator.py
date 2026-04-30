@@ -57,9 +57,11 @@ class SD_Simulator(Simulator):
         # AMR: coarse <-> fine solution-point transfer operators.
         self.dm.LM_prolong, self.dm.LM_restrict = build_transfer_matrices(self.x_sp)
         # AMR: overlap-aware restriction operators (side 0/1) for SP and CV data.
-        self.dm.RS_sp, self.dm.RS_cv = build_overlap_restrict_matrices(
-            self.x_sp, self.x_fp
-        )
+        # Keep these on `dm` as arrays (shape: [2, n, n]) so GPUDataManager can
+        # migrate them with backend switches; tuples are not auto-converted.
+        RS_sp, RS_cv = build_overlap_restrict_matrices(self.x_sp, self.x_fp)
+        self.dm.RS_sp = np.stack(RS_sp, axis=0)
+        self.dm.RS_cv = np.stack(RS_cv, axis=0)
 
         self.mesh_cv = self.compute_mesh_cv()
         self.compute_positions()
