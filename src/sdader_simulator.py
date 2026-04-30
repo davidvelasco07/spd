@@ -14,7 +14,7 @@ import sd_boundary as bc
 from trouble_detection import detect_troubles
 from timeit import default_timer as timer
 from slicing import cut, indices, indices2, crop_fv
-from amr.transfer import prolongate_block, restrict_blocks
+from amr.transfer import prolongate_block, restrict_blocks_overlap_sp
 
 class SDADER_Simulator(SD_Simulator,FV_Simulator):
     def __init__(self,
@@ -307,7 +307,8 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         self.dm.U_cv[...] = self.compute_cv_from_sp(self.dm.U_sp)
         #Change to Finite Volume scheme
         self.dm.U_cv = self.transpose_to_fv(self.dm.U_cv)
-        self.dm.W_cv = self.transpose_to_fv(self.dm.W_cv)
+        # W_cv gets recomputed from U_cv in fv_update; avoid an extra transpose.
+        self.dm.W_cv = np.zeros_like(self.dm.U_cv)
         if self.WB:
             self.dm.U_eq_cv = self.transpose_to_fv(self.dm.U_eq_cv)
         if not(self.godunov):
@@ -317,11 +318,12 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
     def switch_to_high_order(self):
         #Change back to High-Order scheme
         self.dm.U_cv = self.transpose_to_sd(self.dm.U_cv)
-        self.dm.W_cv = self.transpose_to_sd(self.dm.W_cv)
         if self.WB:
             self.dm.U_eq_cv = self.transpose_to_sd(self.dm.U_eq_cv)
         #Compute solution at solution points
         self.dm.U_sp[...] = self.compute_sp_from_cv(self.dm.U_cv)
+        # Rebuild W_cv directly in SD layout (cheaper than FV->SD transpose).
+        self.dm.W_cv = self.compute_primitives(self.dm.U_cv)
         
 
     def store_high_order_fluxes(self,i_ader):
@@ -377,9 +379,12 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
             # bias the DMP check and alter theta. (Non-FB paths are the
             # caller's problem - they handle CF-correction upstream at the
             # SD level.)
-            if self.FB and self.forest.max_level > 0:
+            if self.FB:
+                if self.forest.max_level > 0:
+                    for dim in self.dims:
+                        self.correct_coarse_fine_fv_flux(self.F_faces[dim], dim)
                 for dim in self.dims:
-                    self.correct_coarse_fine_fv_flux(self.F_faces[dim], dim)
+                    self.symmetrize_same_level_fv_flux(self.F_faces[dim], dim)
             #Compute candidate solution
             self.fv_apply_fluxes(dt)
             if self.FB:
@@ -394,6 +399,10 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
                 if self.forest.max_level > 0:
                     for dim in self.dims:
                         self.correct_coarse_fine_fv_flux(self.F_faces[dim], dim)
+                # Also enforce one shared flux value at SAME-level block
+                # interfaces, eliminating residual pair mismatch there.
+                for dim in self.dims:
+                    self.symmetrize_same_level_fv_flux(self.F_faces[dim], dim)
                 #Compute corrected solution
                 self.fv_apply_fluxes(dt)
             #Update solution
@@ -494,7 +503,7 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
         ndim = self.ndim
         dim_keys = list(self.dims.keys())
         LM_p = self.dm.LM_prolong
-        LM_r = self.dm.LM_restrict
+        R_side_sp = self.dm.RS_sp
         for ib, block in enumerate(self.forest.blocks):
             key = (block.level, block.logical)
             if key in snapshot:
@@ -523,7 +532,9 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
                 child_keys.append((block.level + 1, child_logical))
             if all(k in snapshot for k in child_keys):
                 stack = np.stack([snapshot[k] for k in child_keys], axis=1)
-                self.dm.U_sp[:, ib] = restrict_blocks(stack, LM_r, ndim)
+                self.dm.U_sp[:, ib] = restrict_blocks_overlap_sp(
+                    stack, R_side_sp, self.dm.cv_to_sp, ndim
+                )
                 continue
             raise RuntimeError(
                 f"No source data for block {key} (ib={ib}): neither the "
@@ -594,8 +605,8 @@ class SDADER_Simulator(SD_Simulator,FV_Simulator):
 
         2:1 balance is enforced automatically (cascading refinement for
         any remaining level gaps > 1). Block data propagates via
-        prolongate_block (for newly refined children) and restrict_blocks
-        (for newly coarsened parents).
+        prolongate_block (for newly refined children) and overlap-aware
+        SP restriction (for newly coarsened parents).
         """
         to_refine = list(to_refine or [])
         to_derefine = list(to_derefine or [])

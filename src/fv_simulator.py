@@ -7,6 +7,7 @@ import muscl
 
 from slicing import cut, crop_fv, indices
 from amr.tree import SAME, FINER, COARSER, BC as BC_TAG
+from amr.transfer import restrict_blocks_overlap_cv
 
 class FV_Simulator(Simulator):
     def __init__(
@@ -72,6 +73,192 @@ class FV_Simulator(Simulator):
             self.MR_faces[dim] = self.dm.__getattribute__(f"MR_faces_{dim}")
             self.ML_faces[dim] = self.dm.__getattribute__(f"ML_faces_{dim}")
             self.BC_fv[dim] = self.dm.__getattribute__(f"BC_fv_{dim}")
+        # Generic per-face neighbor metadata for all dimensions.
+        self._build_fv_face_neighbor_map()
+        # Precompute AMR-aware CV neighbor metadata (2D) for future SD-layout
+        # FV operators that avoid global SD<->FV transpositions.
+        self._build_fv_cv_neighbor_map_2d()
+
+    def _build_fv_face_neighbor_map(self) -> None:
+        """Build generic FV face-neighbor metadata for all dimensions."""
+        face_map = {}
+        same_pairs = {}
+        same_pair_arrays = {}
+        for dim in self.dims:
+            side_map = {0: [], 1: []}
+            seen = set()
+            pairs = []
+            pair_buckets = {}
+            for side in (0, 1):
+                for ib, block in enumerate(self.forest.blocks):
+                    entries = block.neighbors[dim][side]
+                    rel = entries[0][1] if entries else None
+                    info = {
+                        "ib": int(ib),
+                        "dim": dim,
+                        "side": int(side),
+                        "entries": entries,
+                        "relation": rel,
+                    }
+                    side_map[side].append(info)
+                    if rel == SAME and len(entries) == 1:
+                        jb = int(entries[0][0])
+                        side_j = 1 - side
+                        key = tuple(sorted(((int(ib), int(side)),
+                                            (jb, int(side_j))))) + (dim,)
+                        if key not in seen:
+                            seen.add(key)
+                            pairs.append((int(ib), int(side), jb, int(side_j)))
+                            pair_buckets.setdefault((int(side), int(side_j)), [[], []])
+                            pair_buckets[(int(side), int(side_j))][0].append(int(ib))
+                            pair_buckets[(int(side), int(side_j))][1].append(int(jb))
+            face_map[dim] = side_map
+            same_pairs[dim] = pairs
+            same_pair_arrays[dim] = {
+                k: {
+                    "ib": np.asarray(v[0], dtype=np.int64),
+                    "jb": np.asarray(v[1], dtype=np.int64),
+                }
+                for k, v in pair_buckets.items()
+            }
+        self.fv_face_neighbor_map = face_map
+        self.fv_same_face_pairs_generic = same_pairs
+        self.fv_same_face_pair_arrays = same_pair_arrays
+
+    def _build_fv_cv_neighbor_map_2d(self) -> None:
+        """Build per-block FV CV neighbor metadata for 2D.
+
+        This map is intentionally lightweight: it captures, for each block face,
+        how transverse FV control-volumes align across SAME/COARSER/FINER
+        relations. It does not yet replace the runtime FV kernels; it is the
+        scaffolding needed to implement SD-layout FV operators.
+        """
+        self.fv_cv_neighbor_map = {}
+        self.fv_same_face_pairs = {}
+        if self.ndim != 2:
+            return
+
+        n = self.p + 1
+        face_data = {}
+        same_pairs_by_dim = {}
+        cf_pairs_by_dim = {}
+        group_map_by_dim = {}
+        for dim in ("x", "y"):
+            tdim = "y" if dim == "x" else "x"
+            Nt = self.NB[tdim] * n
+            side_dict = {0: [], 1: []}
+            pair_seen = set()
+            same_pairs = []
+            cf_side = {0: {"coarse_ib": [], "fine_jb": []},
+                       1: {"coarse_ib": [], "fine_jb": []}}
+            coarser_side = {
+                0: {0: {"fine_ib": [], "coarse_jb": []},
+                    1: {"fine_ib": [], "coarse_jb": []}},
+                1: {0: {"fine_ib": [], "coarse_jb": []},
+                    1: {"fine_ib": [], "coarse_jb": []}},
+            }
+            groups = {
+                0: {"same_ib": [], "same_jb": [], "bc_ib": []},
+                1: {"same_ib": [], "same_jb": [], "bc_ib": []},
+            }
+            for side in (0, 1):
+                for ib, block in enumerate(self.forest.blocks):
+                    entries = block.neighbors[dim][side]
+                    rel = entries[0][1] if entries else None
+                    info = {
+                        "ib": ib,
+                        "dim": dim,
+                        "side": side,
+                        "relation": rel,
+                        "entries": entries,
+                        "Nt": Nt,
+                    }
+                    if rel == SAME and len(entries) == 1:
+                        info["transverse"] = {
+                            "mode": "same",
+                            "map": np.arange(Nt, dtype=np.int64),
+                        }
+                        groups[side]["same_ib"].append(int(ib))
+                        groups[side]["same_jb"].append(int(entries[0][0]))
+                    elif rel == COARSER and len(entries) == 1:
+                        # Fine block boundary -> coarser neighbor boundary.
+                        # Two fine transverse CVs collapse into one coarse CV.
+                        _jb, _rel, sub = entries[0]
+                        info["transverse"] = {
+                            "mode": "to_coarser",
+                            "sub": int(sub),
+                            "map": (np.arange(Nt, dtype=np.int64) // 2
+                                    + int(sub) * (Nt // 2)),
+                        }
+                        if sub < 2:
+                            coarser_side[side][int(sub)]["fine_ib"].append(int(ib))
+                            coarser_side[side][int(sub)]["coarse_jb"].append(int(_jb))
+                    elif rel == FINER and len(entries) > 1:
+                        # Coarse block boundary -> finer neighbors boundary.
+                        # One coarse transverse CV corresponds to two fine CVs.
+                        sub_to_jb = {int(sub): int(jb) for (jb, _rel, sub) in entries}
+                        pairs = []
+                        for jt in range(Nt):
+                            sub = 0 if jt < Nt // 2 else 1
+                            local = jt - sub * (Nt // 2)
+                            j0 = 2 * local
+                            j1 = j0 + 1
+                            jb = sub_to_jb[sub]
+                            pairs.append(((jb, j0), (jb, j1)))
+                        info["transverse"] = {
+                            "mode": "to_finer",
+                            "pairs": pairs,
+                        }
+                        sub_to_jb = [None, None]
+                        for (jb, _rel, sub) in entries:
+                            if sub < 2:
+                                sub_to_jb[sub] = int(jb)
+                        if (sub_to_jb[0] is not None) and (sub_to_jb[1] is not None):
+                            cf_side[side]["coarse_ib"].append(int(ib))
+                            cf_side[side]["fine_jb"].append([sub_to_jb[0], sub_to_jb[1]])
+                    elif rel == BC_TAG and len(entries) == 1:
+                        groups[side]["bc_ib"].append(int(ib))
+                    side_dict[side].append(info)
+                    if rel == SAME and len(entries) == 1:
+                        jb = int(entries[0][0])
+                        side_j = 1 - side
+                        key = tuple(sorted(((int(ib), int(side)),
+                                            (jb, int(side_j))))) + (dim,)
+                        if key not in pair_seen:
+                            pair_seen.add(key)
+                            same_pairs.append((int(ib), int(side), jb, int(side_j)))
+            face_data[dim] = side_dict
+            same_pairs_by_dim[dim] = same_pairs
+            cf_pairs_by_dim[dim] = {
+                side: {
+                    "coarse_ib": np.asarray(cf_side[side]["coarse_ib"], dtype=np.int64),
+                    "fine_jb": np.asarray(cf_side[side]["fine_jb"], dtype=np.int64),
+                }
+                for side in (0, 1)
+            }
+            group_map_by_dim[dim] = {
+                side: {
+                    "same_ib": np.asarray(groups[side]["same_ib"], dtype=np.int64),
+                    "same_jb": np.asarray(groups[side]["same_jb"], dtype=np.int64),
+                    "bc_ib": np.asarray(groups[side]["bc_ib"], dtype=np.int64),
+                    "coarser": {
+                        sub: {
+                            "fine_ib": np.asarray(
+                                coarser_side[side][sub]["fine_ib"], dtype=np.int64
+                            ),
+                            "coarse_jb": np.asarray(
+                                coarser_side[side][sub]["coarse_jb"], dtype=np.int64
+                            ),
+                        }
+                        for sub in (0, 1)
+                    },
+                }
+                for side in (0, 1)
+            }
+        self.fv_cv_neighbor_map = face_data
+        self.fv_same_face_pairs = same_pairs_by_dim
+        self.fv_cf_pairs_2d = cf_pairs_by_dim
+        self.fv_cv_groups_2d = group_map_by_dim
     
     def compute_slopes(self,
                        M: np.ndarray,
@@ -275,8 +462,108 @@ class FV_Simulator(Simulator):
         def _view(arr, ib, n):
             return arr[(slice(None),)*n + (ib,)]
 
-        for ib, block in enumerate(self.forest.blocks):
-            for side in (0, 1):
+        xp = self.dm.xp
+        for side in (0, 1):
+            same_jb = self.forest.same_jb[dim][side]
+            if same_jb is not None:
+                # Fast path: every block's neighbor on this face is SAME.
+                # One vectorized gather along Nb replaces the Python loop —
+                # crucial on GPU where per-block launches dominate.
+                self.BC_fv[dim][side][...] = xp.take(
+                    M[interior_cuts[side]], xp.asarray(same_jb), axis=1)
+                continue
+            # 2D map-driven path: same physics as the block-neighbor loop
+            # below, but avoids repeatedly traversing the forest topology.
+            if self.ndim == 2 and dim in self.fv_cv_neighbor_map:
+                infos = self.fv_cv_neighbor_map[dim][side]
+                groups = self.fv_cv_groups_2d[dim][side]
+                same_ib = groups["same_ib"]
+                if same_ib.size:
+                    same_jb = groups["same_jb"]
+                    self.BC_fv[dim][side][:, same_ib, ...] = (
+                        M[interior_cuts[side]][:, same_jb, ...]
+                    )
+                bc_ib = groups["bc_ib"]
+                if bc_ib.size:
+                    if BC[side] == "reflective":
+                        if all:
+                            self.BC_fv[dim][side][:, bc_ib, ...] = (
+                                M[interior_cuts[1-side]][:, bc_ib, ...]
+                            )
+                            self.BC_fv[dim][side][self.vels[idim], bc_ib, ...] *= -1
+                    elif BC[side] == "gradfree":
+                        if all:
+                            self.BC_fv[dim][side][:, bc_ib, ...] = (
+                                M[interior_cuts[1-side]][:, bc_ib, ...]
+                            )
+                    elif BC[side] in ("ic", "pressure"):
+                        pass
+                    elif BC[side] == "eq":
+                        if all:
+                            self.BC_fv[dim][side][:, bc_ib, ...] = 0
+                    else:
+                        raise ValueError(f"Undetermined boundary type: {BC[side]}")
+                # COARSER (fine block receiving coarse ghost data), batched by
+                # sub-face index in the transverse direction.
+                dim_keys = list(self.dims.keys())
+                tdim = [d for d in dim_keys if self.dims[d] != idim][0]
+                half_t = self.NB[tdim] * self.n[tdim] // 2
+                assert ngh % 2 == 0, "fv_store_BC CF path requires even Nghc"
+                half_n = ngh // 2
+                for sub in (0, 1):
+                    cgrp = groups["coarser"][sub]
+                    fine_ib = cgrp["fine_ib"]
+                    if fine_ib.size == 0:
+                        continue
+                    coarse_jb = cgrp["coarse_jb"]
+                    src = M[:, coarse_jb, ...]
+                    coarse_cut = (cut(-ngh - half_n, -ngh, idim) if side == 0
+                                  else cut(ngh, ngh + half_n, idim))
+                    slab = src[coarse_cut]
+                    tv = slice(ngh + sub * half_t, ngh + (sub + 1) * half_t)
+                    if dim == "x":
+                        coarse_sub = slab[:, :, tv, :]
+                        fine = np.repeat(np.repeat(coarse_sub, 2, axis=2), 2, axis=3)
+                        self.BC_fv[dim][side][:, fine_ib, ngh:-ngh, :] = fine
+                    else:
+                        coarse_sub = slab[:, :, :, tv]
+                        fine = np.repeat(np.repeat(coarse_sub, 2, axis=2), 2, axis=3)
+                        self.BC_fv[dim][side][:, fine_ib, :, ngh:-ngh] = fine
+                # FINER (coarse block receiving restricted fine ghost data),
+                # batched with precomputed fine-pair block ids.
+                fgrp = self.fv_cf_pairs_2d[dim][side]
+                coarse_ib = fgrp["coarse_ib"]
+                if coarse_ib.size:
+                    fine_jb = fgrp["fine_jb"]
+                    fine_interior = (cut(-3 * ngh, -ngh, idim) if side == 0
+                                     else cut(ngh, 3 * ngh, idim))
+                    src0 = M[:, fine_jb[:, 0], ...][fine_interior]
+                    src1 = M[:, fine_jb[:, 1], ...][fine_interior]
+                    if dim == "x":
+                        src0 = src0[:, :, ngh:-ngh, :]
+                        src1 = src1[:, :, ngh:-ngh, :]
+                        combined = np.concatenate([src0, src1], axis=2)
+                        coarse_avg = self._fv_avg_pairs(combined, (2, 3))
+                        self.BC_fv[dim][side][:, coarse_ib, ngh:-ngh, :] = coarse_avg
+                    else:
+                        src0 = src0[:, :, :, ngh:-ngh]
+                        src1 = src1[:, :, :, ngh:-ngh]
+                        combined = np.concatenate([src0, src1], axis=3)
+                        coarse_avg = self._fv_avg_pairs(combined, (2, 3))
+                        self.BC_fv[dim][side][:, coarse_ib, :, ngh:-ngh] = coarse_avg
+                for info in infos:
+                    ib = info["ib"]
+                    entries = info["entries"]
+                    rel = info["relation"]
+                    if rel in (SAME, BC_TAG, COARSER, FINER):
+                        continue
+                    bc_slot = _view(self.BC_fv[dim][side], ib, 1)
+                    rels = [e[1] for e in entries] if entries else []
+                    raise NotImplementedError(
+                        f"Mixed FV neighbor relations {rels} at "
+                        f"(ib={ib}, dim={dim}, side={side}).")
+                continue
+            for ib, block in enumerate(self.forest.blocks):
                 entries = block.neighbors[dim][side]
                 bc_slot = _view(self.BC_fv[dim][side], ib, 1)
                 if len(entries) == 1 and entries[0][1] == SAME:
@@ -452,61 +739,207 @@ class FV_Simulator(Simulator):
         bc_slot[tuple(dest_slice)] = coarse_avg
 
     def correct_coarse_fine_fv_flux(self, F_faces: np.ndarray, dim: str) -> None:
-        """Enforce conservation across coarse-fine FV faces.
+        """Enforce conservation across coarse-fine FV faces with overlap-aware
+        restriction in the transverse dimensions.
 
-        Overwrites the coarse block's face flux at every CF face with the
-        arithmetic mean of the fine neighbors' face flux on the same
-        physical interface:
-
-            F_coarse(y) = (1 / 2**(ndim-1)) * sum_{k fine-subs} F_fine_k
-
-        Under uniform FV cell areas (A_fine = A_coarse / 2**(ndim-1)) this
-        guarantees that the coarse block's integrated flux through the
-        face equals the sum of the fine blocks' integrated fluxes, so a
-        unit of mass leaving the coarse block is exactly the mass arriving
-        at the fine blocks. Must be called after the flux computation and
-        before ``fv_apply_fluxes``.
-
-        Supports 1D/2D/3D. ``F_faces`` has layout
-        [nvar, Nb, ...cells..., (cells_dim + 1 on the face axis)].
+        For p>1 the coarse and fine face control-volumes do not overlap as
+        simple pairwise halves; arithmetic averaging leaks conservation.
+        This uses the same overlap infrastructure as SD restriction, applied
+        to face-CV data in ndim-1 dimensions.
         """
         idim = self.dims[dim]
         ndim = self.ndim
+        face_ndim = ndim - 1
+        R_side_cv = self.dm.RS_cv
         _view = lambda arr, ib_, n: arr[(slice(None),) * n + (ib_,)]
+
+        if face_ndim == 0:
+            for ib, block in enumerate(self.forest.blocks):
+                for side in (0, 1):
+                    entries = block.neighbors[dim][side]
+                    if not entries or entries[0][1] != FINER:
+                        continue
+                    my_face_idx = 0 if side == 0 else -1
+                    fine_face_idx = -1 if side == 0 else 0
+                    jb, _rel, _sub = entries[0]
+                    _view(F_faces, ib, 1)[indices(my_face_idx, idim)] = (
+                        _view(F_faces, jb, 1)[indices(fine_face_idx, idim)]
+                    )
+            return
+
+        dim_keys = list(self.dims.keys())
+        trans_dims = [d for d in dim_keys[::-1] if d != dim]
+        n = self.p + 1
+
+        def _face_to_nested(arr_face: np.ndarray) -> np.ndarray:
+            # [nvar, ..., NB[d]*n, ...] -> [nvar, NB..., n...]
+            shape = [arr_face.shape[0]]
+            n_trans = len(trans_dims)
+            for d in trans_dims:
+                shape += [self.NB[d], n]
+            reshaped = arr_face.reshape(shape)
+            perm = [0] + [1 + 2 * i for i in range(n_trans)] + [
+                2 + 2 * i for i in range(n_trans)
+            ]
+            return np.transpose(reshaped, perm)
+
+        def _nested_to_face(arr_nested: np.ndarray) -> np.ndarray:
+            # [nvar, NB..., n...] -> [nvar, ..., NB[d]*n, ...]
+            n_trans = len(trans_dims)
+            perm = [0]
+            for i in range(n_trans):
+                perm += [1 + i, 1 + n_trans + i]
+            interleaved = np.transpose(arr_nested, perm)
+            out_shape = [arr_nested.shape[0]]
+            for d in trans_dims:
+                out_shape.append(self.NB[d] * n)
+            return interleaved.reshape(out_shape)
+
+        if self.ndim == 2 and dim in self.fv_cf_pairs_2d:
+            n = self.p + 1
+            tdim = "y" if dim == "x" else "x"
+            NB_t = self.NB[tdim]
+            for side in (0, 1):
+                pair = self.fv_cf_pairs_2d[dim][side]
+                coarse_ib = pair["coarse_ib"]
+                if coarse_ib.size == 0:
+                    continue
+                fine_jb = pair["fine_jb"]
+                my_face_idx = 0 if side == 0 else -1
+                fine_face_idx = -1 if side == 0 else 0
+                coarse_face = F_faces[indices(my_face_idx, idim)]   # [nvar, Nb, Nt]
+                fine_face = F_faces[indices(fine_face_idx, idim)]   # [nvar, Nb, Nt]
+                fine0 = fine_face[:, fine_jb[:, 0], :]              # [nvar, Nif, Nt]
+                fine1 = fine_face[:, fine_jb[:, 1], :]
+                fine0_nested = fine0.reshape(fine0.shape[0], fine0.shape[1], NB_t, n)
+                fine1_nested = fine1.reshape(fine1.shape[0], fine1.shape[1], NB_t, n)
+                stack = np.stack((fine0_nested, fine1_nested), axis=2)  # child axis=2
+                coarse_nested = restrict_blocks_overlap_cv(stack, R_side_cv, 1)
+                coarse_flat = coarse_nested.reshape(
+                    coarse_nested.shape[0], coarse_nested.shape[1], NB_t * n
+                )
+                coarse_face[:, coarse_ib, :] = coarse_flat
+            return
+
+        if dim in self.fv_face_neighbor_map:
+            for side in (0, 1):
+                for info in self.fv_face_neighbor_map[dim][side]:
+                    ib = info["ib"]
+                    entries = info["entries"]
+                    if not entries or info["relation"] != FINER:
+                        continue
+                    my_face_idx   = 0 if side == 0 else -1
+                    fine_face_idx = -1 if side == 0 else 0
+                    n_sub = 2 ** face_ndim
+                    fine_fluxes = [None] * n_sub
+                    for (jb, _rel, sub) in entries:
+                        src = _view(F_faces, jb, 1)
+                        fine_fluxes[sub] = _face_to_nested(src[indices(fine_face_idx, idim)])
+                    stack = np.stack(fine_fluxes, axis=1)
+                    coarse_nested = restrict_blocks_overlap_cv(
+                        stack, R_side_cv, face_ndim
+                    )
+                    _view(F_faces, ib, 1)[indices(my_face_idx, idim)] = (
+                        _nested_to_face(coarse_nested)
+                    )
+            return
+
         for ib, block in enumerate(self.forest.blocks):
             for side in (0, 1):
                 entries = block.neighbors[dim][side]
                 if not entries or entries[0][1] != FINER:
                     continue
-                # Coarse face index along the face-dim axis; neighbor's
-                # matching face is the opposite side.
                 my_face_idx   = 0 if side == 0 else -1
                 fine_face_idx = -1 if side == 0 else 0
-                n_sub = 2 ** (ndim - 1)
+                n_sub = 2 ** face_ndim
                 fine_fluxes = [None] * n_sub
                 for (jb, _rel, sub) in entries:
                     src = _view(F_faces, jb, 1)
-                    fine_fluxes[sub] = src[indices(fine_face_idx, idim)]
-                # After face indexing, shape is [nvar, ...transverse cells...].
-                # Sub-index bit k corresponds to the k-th non-dim in natural
-                # self.dims order; inner bit (0) -> last axis, outer bit (1)
-                # -> axis 1 (same convention as _fv_fill_from_finer).
-                if ndim == 1:
-                    combined = fine_fluxes[0]
-                elif ndim == 2:
-                    combined = np.concatenate(fine_fluxes, axis=ndim - 1)
-                else:   # ndim == 3 — 4 fine neighbors in a 2x2 tile.
-                    lo = np.concatenate([fine_fluxes[0], fine_fluxes[1]],
-                                         axis=ndim - 1)
-                    hi = np.concatenate([fine_fluxes[2], fine_fluxes[3]],
-                                         axis=ndim - 1)
-                    combined = np.concatenate([lo, hi], axis=1)
-                # Average pairs on every transverse axis to reduce
-                # 2**(ndim-1) fine sub-faces -> 1 coarse face value.
-                avg_axes = tuple(range(1, ndim))
-                coarse_flux = (self._fv_avg_pairs(combined, avg_axes)
-                               if avg_axes else combined)
-                _view(F_faces, ib, 1)[indices(my_face_idx, idim)] = coarse_flux
+                    fine_fluxes[sub] = _face_to_nested(src[indices(fine_face_idx, idim)])
+                stack = np.stack(fine_fluxes, axis=1)
+                coarse_nested = restrict_blocks_overlap_cv(
+                    stack, R_side_cv, face_ndim
+                )
+                _view(F_faces, ib, 1)[indices(my_face_idx, idim)] = (
+                    _nested_to_face(coarse_nested)
+                )
+
+    def symmetrize_same_level_fv_flux(self, F_faces: np.ndarray, dim: str) -> None:
+        """Enforce a unique flux at SAME-level block interfaces.
+
+        At block interfaces where both neighbors are SAME-level, each side can
+        carry slightly different face fluxes (notably in FB/Godunov AMR paths).
+        This routine projects each interface pair onto the conservative manifold:
+          - opposite sides (1<->0):    F_i =  F_j = 0.5*(F_i + F_j)
+          - same sides (0<->0,1<->1): F_i = -F_j = 0.5*(F_i - F_j)
+        restoring pairwise cancellation in the global divergence sum.
+        """
+        idim = self.dims[dim]
+        _view = lambda arr, ib_, n: arr[(slice(None),) * n + (ib_,)]
+        if self.ndim == 2 and dim in self.fv_same_face_pairs:
+            for (ib, side, jb, side_j) in self.fv_same_face_pairs[dim]:
+                my_face_idx = 0 if side == 0 else -1
+                nb_face_idx = 0 if side_j == 0 else -1
+                my_face = _view(F_faces, ib, 1)[indices(my_face_idx, idim)]
+                nb_face = _view(F_faces, jb, 1)[indices(nb_face_idx, idim)]
+                avg = 0.5 * (my_face + nb_face)
+                _view(F_faces, ib, 1)[indices(my_face_idx, idim)] = avg
+                _view(F_faces, jb, 1)[indices(nb_face_idx, idim)] = avg
+            return
+        if dim in self.fv_same_face_pair_arrays:
+            F0 = F_faces[indices(0, idim)]
+            Fm1 = F_faces[indices(-1, idim)]
+            for (side, side_j), pair in self.fv_same_face_pair_arrays[dim].items():
+                ib = pair["ib"]
+                jb = pair["jb"]
+                if ib.size == 0:
+                    continue
+                my_face = F0[:, ib, ...] if side == 0 else Fm1[:, ib, ...]
+                nb_face = F0[:, jb, ...] if side_j == 0 else Fm1[:, jb, ...]
+                avg = 0.5 * (my_face + nb_face)
+                if side == 0:
+                    F0[:, ib, ...] = avg
+                else:
+                    Fm1[:, ib, ...] = avg
+                if side_j == 0:
+                    F0[:, jb, ...] = avg
+                else:
+                    Fm1[:, jb, ...] = avg
+            return
+        if dim in self.fv_same_face_pairs_generic:
+            for (ib, side, jb, side_j) in self.fv_same_face_pairs_generic[dim]:
+                my_face_idx = 0 if side == 0 else -1
+                nb_face_idx = 0 if side_j == 0 else -1
+                my_face = _view(F_faces, ib, 1)[indices(my_face_idx, idim)]
+                nb_face = _view(F_faces, jb, 1)[indices(nb_face_idx, idim)]
+                avg = 0.5 * (my_face + nb_face)
+                _view(F_faces, ib, 1)[indices(my_face_idx, idim)] = avg
+                _view(F_faces, jb, 1)[indices(nb_face_idx, idim)] = avg
+            return
+
+        seen = set()
+
+        for ib, block in enumerate(self.forest.blocks):
+            for side in (0, 1):
+                entries = block.neighbors[dim][side]
+                if not entries or len(entries) != 1 or entries[0][1] != SAME:
+                    continue
+                jb, _rel, _sub = entries[0]
+                # A block pair can share two SAME interfaces under periodic
+                # wrapping (e.g. 2 blocks in a periodic direction). Distinguish
+                # interfaces by side pairing, not just by block ids.
+                side_j = 1 - side
+                key = tuple(sorted(((ib, side), (jb, side_j)))) + (dim,)
+                if key in seen:
+                    continue
+                seen.add(key)
+                my_face_idx = 0 if side == 0 else -1
+                nb_face_idx = 0 if side_j == 0 else -1
+                my_face = _view(F_faces, ib, 1)[indices(my_face_idx, idim)]
+                nb_face = _view(F_faces, jb, 1)[indices(nb_face_idx, idim)]
+                avg = 0.5 * (my_face + nb_face)
+                _view(F_faces, ib, 1)[indices(my_face_idx, idim)] = avg
+                _view(F_faces, jb, 1)[indices(nb_face_idx, idim)] = avg
 
     def fv_apply_BC(self,
                  dim: str) -> None:

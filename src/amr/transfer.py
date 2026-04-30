@@ -17,7 +17,9 @@ from typing import Tuple
 import numpy as np
 
 from polynomials import lagrange_matrix
+from polynomials import intfromsol_matrix
 from transforms import compute_A_from_B_full
+from transforms import compute_A_from_B
 
 
 def build_transfer_matrices(x_sp: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -28,6 +30,148 @@ def build_transfer_matrices(x_sp: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     LM_prolong = lagrange_matrix(x_fine, x_coarse)    # (2n, n)
     LM_restrict = lagrange_matrix(x_coarse, x_fine)   # (n, 2n)
     return LM_prolong, LM_restrict
+
+
+def _segment_to_coarse_rows(x_fp: np.ndarray,
+                            side_edges_local: np.ndarray,
+                            side: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Map child-side segments to coarse-cell indices and lengths.
+
+    `side_edges_local` lives on child local coordinates [0, 1]. The
+    corresponding global coordinates are x = 0.5*(x_local + side).
+    """
+    widths = np.diff(x_fp)
+    edges = 0.5 * (side_edges_local + float(side))
+    mids = 0.5 * (edges[:-1] + edges[1:])
+    rows = np.searchsorted(x_fp, mids, side="right") - 1
+    rows = np.clip(rows, 0, widths.size - 1)
+    lens = np.diff(edges)
+    return rows, lens
+
+
+def _cv_overlap_matrix(x_fp: np.ndarray, side: int) -> np.ndarray:
+    """Return (n, n) child-CV -> coarse-CV overlap restriction matrix.
+
+    Matrix rows are coarse CVs and columns are child-side fine CVs.
+    Coefficients are overlap length divided by coarse-cell width.
+    """
+    n = x_fp.size - 1
+    out = np.zeros((n, n))
+    coarse_w = np.diff(x_fp)
+    fine_edges = 0.5 * (x_fp + float(side))
+    for j in range(n):
+        a0, a1 = x_fp[j], x_fp[j + 1]
+        for i in range(n):
+            b0, b1 = fine_edges[i], fine_edges[i + 1]
+            overlap = max(0.0, min(a1, b1) - max(a0, b0))
+            if overlap > 0.0:
+                out[j, i] += overlap / coarse_w[j]
+    return out
+
+
+def build_overlap_restrict_matrices(
+    x_sp: np.ndarray,
+    x_fp: np.ndarray,
+) -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
+    """Build side-aware overlap restriction matrices.
+
+    Returns
+    -------
+    (R_sp_0, R_sp_1), (R_cv_0, R_cv_1)
+        - R_sp_* : child-SP -> coarse-CV contribution matrix on side *.
+        - R_cv_* : child-CV -> coarse-CV contribution matrix on side *.
+    """
+    p = x_sp.size - 1
+    n = p + 1
+    m = (p + 2) // 2
+    x_c = 2.0 * x_fp
+    # For even p, x=0.5 is not a Gauss flux point; insert the split.
+    if p % 2 == 0:
+        x_c = np.concatenate((x_c[:m], np.ones(1), x_c[m:]))
+    x_1 = x_c[:m + 1]
+    x_2 = x_c[m:] - 1.0
+    side_edges = (x_1, x_2)
+
+    R_sp = []
+    for side in (0, 1):
+        L_side = intfromsol_matrix(x_sp, side_edges[side])
+        rows, lens = _segment_to_coarse_rows(x_fp, side_edges[side], side)
+        R_side = np.zeros((n, n))
+        widths = np.diff(x_fp)
+        for k, j in enumerate(rows):
+            R_side[j] += (lens[k] / widths[j]) * L_side[k]
+        R_sp.append(R_side)
+
+    R_cv = [_cv_overlap_matrix(x_fp, side) for side in (0, 1)]
+    return (R_sp[0], R_sp[1]), (R_cv[0], R_cv[1])
+
+
+def _restrict_blocks_overlap(
+    W_fine: np.ndarray,
+    R_side: Tuple[np.ndarray, np.ndarray],
+    ndim: int,
+) -> np.ndarray:
+    """Side-aware overlap restriction to coarse CV representation."""
+    lead = W_fine.ndim - 1 - 2 * ndim
+    n = R_side[0].shape[0]
+    NB = list(W_fine.shape[lead + 1:lead + 1 + ndim])
+
+    # 1) Expand the child axis into ndim binary child-direction axes.
+    split = list(W_fine.shape[:lead]) + [2] * ndim + NB + [n] * ndim
+    Wf = W_fine.reshape(split)
+    # 2) Interleave child-direction and cell axes.
+    child_axes = [lead + k for k in range(ndim)]
+    cell_axes = [lead + ndim + k for k in range(ndim)]
+    pt_axes = [lead + 2 * ndim + k for k in range(ndim)]
+    interleaved = []
+    for k in range(ndim):
+        interleaved += [child_axes[k], cell_axes[k]]
+    perm = list(range(lead)) + interleaved + pt_axes
+    Wf = Wf.transpose(perm)
+    # 3) Merge each (2_child, NB) pair to a single fine-element axis (2*NB).
+    merged = list(Wf.shape[:lead]) + [2 * nb for nb in NB] + [n] * ndim
+    Wf = Wf.reshape(merged)
+
+    out = np.zeros(Wf.shape[:lead] + tuple(NB) + (n,) * ndim, dtype=W_fine.dtype)
+    dims = ("x", "y", "z")
+    # 4) Gather parity subsets (fine element parity per dim), apply side-aware
+    #    point restriction, and accumulate contributions into coarse CVs.
+    for sub_idx in range(2 ** ndim):
+        # Cell axes are ordered (z,y,x); sub_idx bits are (x,y,z).
+        cell_sel = tuple(
+            slice((sub_idx >> (ndim - 1 - ax)) & 1, None, 2)
+            for ax in range(ndim)
+        )
+        contrib = Wf[(slice(None),) * lead + cell_sel + (Ellipsis,)]
+        for k in range(ndim):
+            side = (sub_idx >> k) & 1
+            contrib = compute_A_from_B(contrib, R_side[side], dims[k], ndim)
+        out += contrib
+    return out
+
+
+def restrict_blocks_overlap_sp(
+    W_fine: np.ndarray,
+    R_side_sp: Tuple[np.ndarray, np.ndarray],
+    cv_to_sp: np.ndarray,
+    ndim: int,
+) -> np.ndarray:
+    """2**ndim fine children -> coarse block using overlap-aware CV transfer.
+
+    Child data is interpreted at solution points. Restriction is:
+      child SP -> overlap-weighted coarse CV -> coarse SP.
+    """
+    W_cv = _restrict_blocks_overlap(W_fine, R_side_sp, ndim)
+    return compute_A_from_B_full(W_cv, cv_to_sp, ndim)
+
+
+def restrict_blocks_overlap_cv(
+    W_fine: np.ndarray,
+    R_side_cv: Tuple[np.ndarray, np.ndarray],
+    ndim: int,
+) -> np.ndarray:
+    """2**ndim fine children -> coarse CV data with overlap weights."""
+    return _restrict_blocks_overlap(W_fine, R_side_cv, ndim)
 
 
 def prolongate_block(W_coarse: np.ndarray,

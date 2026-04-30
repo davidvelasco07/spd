@@ -15,6 +15,7 @@ from transforms import compute_A_from_B_full
 
 import riemann_solver as rs
 from amr.transfer import build_transfer_matrices
+from amr.transfer import build_overlap_restrict_matrices
 
 class SD_Simulator(Simulator):
     def __init__(
@@ -55,6 +56,10 @@ class SD_Simulator(Simulator):
         self.dm.cv_to_sp = np.linalg.inv(self.dm.sp_to_cv)
         # AMR: coarse <-> fine solution-point transfer operators.
         self.dm.LM_prolong, self.dm.LM_restrict = build_transfer_matrices(self.x_sp)
+        # AMR: overlap-aware restriction operators (side 0/1) for SP and CV data.
+        self.dm.RS_sp, self.dm.RS_cv = build_overlap_restrict_matrices(
+            self.x_sp, self.x_fp
+        )
 
         self.mesh_cv = self.compute_mesh_cv()
         self.compute_positions()

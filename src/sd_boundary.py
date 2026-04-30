@@ -4,7 +4,7 @@ from slicing import cut
 from slicing import indices
 from slicing import indices2
 from amr.tree import SAME, FINER, COARSER, BC
-from amr.transfer import prolongate_block, restrict_blocks
+from amr.transfer import prolongate_block, restrict_blocks_overlap_sp
 
 
 def _block_view(M: np.ndarray, ib: int, n_lead: int) -> np.ndarray:
@@ -66,13 +66,22 @@ def store_BC(self: SD_Simulator,
     # before the Nb axis.
     n_lead = 2
     LM_prolong = self.dm.LM_prolong
-    LM_restrict = self.dm.LM_restrict
-    for ib, block in enumerate(self.forest.blocks):
-        for side in (0, 1):
+    R_side_sp = self.dm.RS_sp
+    xp = self.dm.xp
+    for side in (0, 1):
+        face_idx = indices2(side - 1, ndim, idim)
+        same_jb = self.forest.same_jb[dim][side]
+        if same_jb is not None:
+            # Fast path: every block's neighbor on this face is SAME-level.
+            # One vectorized gather along the Nb axis replaces the Python
+            # per-block loop — critical on GPU where per-block kernel
+            # launches dominate runtime.
+            BC_array[side][...] = xp.take(M[face_idx], xp.asarray(same_jb),
+                                           axis=n_lead)
+            continue
+        for ib, block in enumerate(self.forest.blocks):
             entries = block.neighbors[dim][side]
             bc_slot = _block_view(BC_array[side], ib, n_lead)
-            # Neighbor's "opposite face" trace (right-face if my side==0, etc.).
-            face_idx = indices2(side - 1, ndim, idim)
             rel0 = entries[0][1]
 
             if len(entries) == 1 and rel0 == SAME:
@@ -123,7 +132,9 @@ def store_BC(self: SD_Simulator,
                         traces[sub] = _block_view(M, jb, n_lead)[face_idx]
                     stack = np.stack(traces, axis=n_lead)
                     # stack shape: [nvar, nader, 2**(ndim-1), trans_cells, trans_pts]
-                    bc_slot[...] = restrict_blocks(stack, LM_restrict, ndim - 1)
+                    bc_slot[...] = restrict_blocks_overlap_sp(
+                        stack, R_side_sp, self.dm.cv_to_sp, ndim - 1
+                    )
 
             else:
                 rels = [e[1] for e in entries]
@@ -168,7 +179,7 @@ def correct_coarse_fine_flux(self: SD_Simulator,
     idim = self.dims[dim]
     ndim = self.ndim
     n_lead = 2
-    LM_restrict = self.dm.LM_restrict
+    R_side_sp = self.dm.RS_sp
     for ib, block in enumerate(self.forest.blocks):
         for side in (0, 1):
             entries = block.neighbors[dim][side]
@@ -191,4 +202,6 @@ def correct_coarse_fine_flux(self: SD_Simulator,
                 for (jb, _rel, sub) in entries:
                     fluxes[sub] = _block_view(F_fp, jb, n_lead)[fine_face_sel]
                 stack = np.stack(fluxes, axis=n_lead)
-                my_view[my_face_sel] = restrict_blocks(stack, LM_restrict, ndim - 1)
+                my_view[my_face_sel] = restrict_blocks_overlap_sp(
+                    stack, R_side_sp, self.dm.cv_to_sp, ndim - 1
+                )
