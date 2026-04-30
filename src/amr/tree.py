@@ -237,6 +237,35 @@ class BlockForest:
 
                     # 4) Nothing found — domain boundary.
                     block.neighbors[dim][side].append((None, BC, None))
+        # After neighbor table is built, cache a vectorized-friendly
+        # mapping for the all-SAME-neighbors case (the dominant hot path
+        # on uniform grids, where the Python per-block loop in store_BC
+        # is catastrophic on GPU).
+        self._build_fast_paths()
+
+    def _build_fast_paths(self) -> None:
+        """Precompute per-face data for vectorized boundary exchange.
+
+        If every block's neighbor on (dim, side) is a SAME-level block,
+        build a int64 array of length Nblocks with the neighbor's ib.
+        Otherwise store None and the caller falls back to the per-block
+        Python loop (AMR / BC / MPI-edge paths).
+        """
+        import numpy as _np
+        self.same_jb = {d: [None, None] for d in self.dims}
+        Nb = len(self.blocks)
+        for dim in self.dims:
+            for side in (0, 1):
+                jbs = _np.empty(Nb, dtype=_np.int64)
+                all_same = True
+                for ib, b in enumerate(self.blocks):
+                    entries = b.neighbors[dim][side]
+                    if len(entries) == 1 and entries[0][1] == SAME:
+                        jbs[ib] = entries[0][0]
+                    else:
+                        all_same = False
+                        break
+                self.same_jb[dim][side] = jbs if all_same else None
 
     def _sub_face_index_logical(self, coarse: MeshBlock, fine: MeshBlock,
                                  dim: str) -> int:

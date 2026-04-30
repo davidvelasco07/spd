@@ -64,6 +64,32 @@ def lagrange_matrix(
     np.fill_diagonal(den, 1.0)
     return num.prod(axis=-1)/den.prod(axis=-1)[np.newaxis, :]
 
+def lagrange_second_matrix(
+    x_to: np.ndarray,
+    x_from: np.ndarray,
+) -> np.ndarray:
+    """
+    Return an ``(m, n)`` matrix of second derivatives of Lagrange polynomials defined
+    on ``n`` nodes ``x_from``, evaluated at ``m`` points ``x_to``.
+
+    Each column ``j`` is built from the degree-``len(x_from)-1`` interpolant that is
+    one at ``x_from[j]`` and zero at the other nodes (same nodal basis as
+    ``lagrange_matrix`` / ``lagrangeprime_matrix``).
+    """
+    assert len(x_to.shape) == 1, "x_to must be 1D."
+    assert len(x_from.shape) == 1, "x_from must be 1D."
+    p = x_from.shape[0] - 1
+    m, n = x_to.shape[0], x_from.shape[0]
+    out = np.zeros((m, n), dtype=float)
+    for j in range(n):
+        y = np.zeros(n, dtype=float)
+        y[j] = 1.0
+        coeffs = np.polyfit(x_from, y, deg=p)
+        c2 = np.polyder(coeffs, 2)
+        out[:, j] = np.polyval(c2, x_to)
+    return out
+
+
 def lagrangeprime_matrix(
     x_to: np.ndarray,
     x_from: np.ndarray,
