@@ -1,8 +1,8 @@
 import numpy as np
 from simulator import Simulator
 
-from slicing import cut
-from slicing import crop_fv
+from numerics.slicing import cut
+from numerics.slicing import crop_fv
 
 class Slope_limiter:
     def __init__(self,limiter):
@@ -64,7 +64,6 @@ class Slope_limiter:
             h_cv: np.ndarray,
             h_fp: np.ndarray,
             idim: int,)->np.ndarray:
-
             dM = (M[cut(1,None,idim)] - M[cut(None,-1,idim)])/h_cv
             dMh = limiter(dM[cut(None,-1,idim)],
                           dM[cut(1,None,idim)],
@@ -120,11 +119,11 @@ def MUSCL_fluxes(self: Simulator,
     for dim in self.dims:
         idim=self.dims[dim]
         
-        S = self.compute_slopes(self.dm.M_fv,idim)    
+        S = self.compute_slopes(self.dm.M,idim)    
         
-        self.MR_faces[dim][...] = self.interpolate_R(self.dm.M_fv,S,idim)
-        self.ML_faces[dim][...] = self.interpolate_L(self.dm.M_fv,S,idim)
-        self.solve_riemann_problem_fv(dim,F[dim],prims)
+        self.MR_fp[dim][...] = self.interpolate_R(self.dm.M,S,idim)
+        self.ML_fp[dim][...] = self.interpolate_L(self.dm.M,S,idim)
+        self.solve_riemann_problem(dim,F[dim],prims)
     
 def compute_prediction(W: np.ndarray,
                        dWs: np.ndarray,
@@ -193,70 +192,32 @@ def MUSCL_Hancock_fluxes(self: Simulator,
     """
     dMhs={}
     S={}
-    crop = lambda start,end,idim : crop_fv(start,end,idim,self.ndim,1)
+    nghc = getattr(self, "Nghc", 1)
+    crop = lambda start, end, idim: crop_fv(start, end, idim, self.ndim, nghc)
     for dim in self.dims:
         idim=self.dims[dim]
-        dMh = self.compute_gradients_fv(self.dm.M_fv,idim)
+        dMh = self.compute_gradients(self.dm.M,idim)
         #Compute and store slopes in a dictionary
         S[idim] = 0.5*dMh*self.h_fp[dim][cut(1,-1,idim)]
         #Store gradients in a dictionary
         dMhs[idim] = dMh[crop(None,None,idim)]
         if self.WB:
-            dMhs[idim+self.ndim] = self.compute_gradients_fv(self.dm.M_eq_fv,idim)[crop(None,None,idim)]
+            dMhs[idim+self.ndim] = self.compute_gradients(self.dm.M_eq,idim)[crop(None,None,idim)]
     if self.WB:
-        self.dm.M_fv += self.dm.M_eq_fv                    
-    self.compute_prediction(self.dm.M_fv[crop(1,-1,0)],dMhs)
+        self.dm.M += self.dm.M_eq                    
+    self.compute_prediction(self.dm.M[crop(1,-1,0)],dMhs)
     if self.WB:
         if self.potential:
-            drho = ((self.dm.M_fv[0]-self.dm.M_eq_fv[0])/self.dm.M_fv[0])[crop(1,-1,0)]
+            drho = ((self.dm.M[0]-self.dm.M_eq[0])/self.dm.M[0])[crop(1,-1,0)]
             for vel in self.vels[:self.ndim]:
-                self.dm.dtM[vel][crop(1,-1,0)] += drho[crop(1,-1,0)]*self.dm.grad_phi_fv[vel-1]
+                self.dm.dtM[vel][crop(1,-1,0)] += drho[crop(1,-1,0)]*self.dm.grad_phi[vel-1]
         #We move back to the perturbation
-        self.dm.M_fv -= self.dm.M_eq_fv
-    self.dm.M_fv[crop(1,-1,0)] += 0.5*self.dm.dtM*dt
+        self.dm.M -= self.dm.M_eq
+    self.dm.M[crop(1,-1,0)] += 0.5*self.dm.dtM*dt
     
     for dim in self.dims:
         idim=self.dims[dim]
-        self.MR_faces[dim][...] = self.interpolate_R(self.dm.M_fv,S[idim],idim)
-        self.ML_faces[dim][...] = self.interpolate_L(self.dm.M_fv,S[idim],idim)
-        self.solve_riemann_problem_fv(dim,F[dim],prims)
-    
-def compute_nabla_terms(self: Simulator,
-                      F: dict,)->None:
-    """
-    Parameters
-    ---------- 
-        self:   Simulator object
-        F:      Dictionary with references to Flux array
-                F = {x: Fx, y: Fy, z: Fz}
-    
-    Overwrites
-    ----------
-        F:      Fluxes given by the Riemann solver
-    """
-    ngh=self.Nghc
-    dW={}
-    for dim in self.dims:
-        idim = self.dims[dim]
-        #Make a choice of values (here left)
-        M = self.ML_faces[dim]
-        h = self.h_fp[dim][cut(ngh,-ngh,idim)]
-        #Compute gradient in dim at cell centers
-        dW[idim] = (M[cut( 1,None,idim)]-M[cut(None,-1,idim)])/h
-    dW_f = {}
-    for dim in self.dims:
-        shift = self.dims[dim]
-        vels = np.roll(self.vels,-shift)
-        #Interpolate gradients(all) to faces at dim
-        idims = self.idims if self.viscosity else [idim]
-        for idim in idims:
-            self.fill_active_region(dW[idim])
-            self.fv_Boundaries(self.dm.M_fv,all=False)    
-            S = self.compute_slopes(self.dm.M_fv,shift)
-            #Counter the previous choice of values (now right)
-            dW_f[idim] = self.interpolate_R(self.dm.M_fv,S,shift)
-        #Add viscous flux
-        F[dim][...] -= self.compute_viscous_fluxes(self.ML_faces[dim],dW_f,vels,prims=True)
-        if self.thdiffusion:
-            #Add thermal flux
-            F[dim][self._p_] -= self.compute_thermal_fluxes(self.ML_faces[dim],dW_f[self.dims[dim]],prims=True)
+        self.MR_fp[dim][...] = self.interpolate_R(self.dm.M,S[idim],idim)
+        self.ML_fp[dim][...] = self.interpolate_L(self.dm.M,S[idim],idim)
+        self.solve_riemann_problem(dim,F[dim],prims)
+

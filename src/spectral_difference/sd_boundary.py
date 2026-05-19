@@ -1,8 +1,14 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import numpy as np
-from sd_simulator import SD_Simulator
-from slicing import cut
-from slicing import indices
-from slicing import indices2
+
+if TYPE_CHECKING:
+    from spectral_difference.sd_simulator import SD_Simulator
+from numerics.slicing import cut
+from numerics.slicing import indices
+from numerics.slicing import indices2
    
 def store_interfaces(self: SD_Simulator,
                      M: np.ndarray,
@@ -67,10 +73,9 @@ def apply_BC(self: SD_Simulator,
     self.ML_fp[dim][indices( 0,shift)] = self.BC_fp[dim][0]
     self.MR_fp[dim][indices(-1,shift)] = self.BC_fp[dim][1]
 
-def Boundaries_sd(self: SD_Simulator,
+def Boundaries(self: SD_Simulator,
                   M: np.ndarray,
                   dim: str):
     store_BC(self,self.BC_fp[dim],M,dim)
-    store_interfaces(self,M,dim)
     self.Comms_fp(M,dim)
     apply_BC(self,dim)
