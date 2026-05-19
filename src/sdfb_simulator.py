@@ -314,3 +314,8 @@ class SPD_Simulator(Simulator):
         raise AttributeError(
             f"'{type(self).__name__}' object has no attribute '{name}'"
         )
+
+
+# Backward-compatible names used by tests and legacy scripts.
+SDFB_Simulator = SPD_Simulator
+SDADER_Simulator = SPD_Simulator

@@ -3,6 +3,9 @@
 .pytest_cache/
 .vscode/
 **/.ipynb_checkpoints/
+.venv/
+docs/_build/
+test/core.*
 
 temp
 jobs
