@@ -2,10 +2,10 @@ import pytest
 import sys
 sys.path.append("../src")
 import numpy as np
-import polynomials as poly
-from transforms import compute_A_from_B
-from transforms import compute_A_from_B_full
-from sd_simulator import SD_Simulator
+from numerics import polynomials as poly
+from numerics.transforms import compute_A_from_B
+from numerics.transforms import compute_A_from_B_full
+from spectral_difference.sd_simulator import SD_Simulator
 from itertools import repeat
 
 tolerance=1E-14

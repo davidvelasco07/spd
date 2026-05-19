@@ -1,6 +1,52 @@
 import numpy as np
 from simulator import Simulator
-from slicing import cut, crop_fv
+from numerics.slicing import cut, crop_fv
+
+
+def detect_troubles_induction(
+    scheme,
+    tolerance: float = 0.05,
+    blending: bool = True,
+) -> None:
+    """
+    Mark troubled CVs from |B^2| variation (induction / MHD fallback).
+    Fills ``scheme.dm.troubles`` and optional ``theta`` / ``affected_faces_*``.
+    """
+    if getattr(scheme, "godunov", False):
+        return
+    ngh = scheme.Nghc
+    crop = lambda start, end, idim: crop_fv(start, end, idim, scheme.ndim, ngh)
+    B2 = scheme.compute_B2()
+    trouble = np.zeros_like(B2, dtype=np.int32)
+    for idim in scheme.idims:
+        jump = np.abs(B2[crop(2, -1, idim)] - B2[crop(None, -2, idim)])
+        mx = np.maximum(
+            np.abs(B2[crop(2, -1, idim)]), np.abs(B2[crop(1, -2, idim)])
+        )
+        local = jump / (mx + 1e-20) > tolerance
+        trouble[crop(1, -1, idim)] = np.maximum(
+            trouble[crop(1, -1, idim)], local.astype(np.int32)
+        )
+    scheme.dm.troubles[...] = trouble
+    th0 = scheme.dm.theta[0]
+    th0[...] = trouble.astype(th0.dtype)
+    if blending:
+        tr = trouble.astype(np.float64)
+        for idim in scheme.idims:
+            th0[crop(None, -1, idim)] = np.maximum(
+                th0[crop(None, -1, idim)], 0.75 * tr[crop(1, None, idim)]
+            )
+            th0[crop(1, None, idim)] = np.maximum(
+                th0[crop(1, None, idim)], 0.75 * tr[crop(None, -1, idim)]
+            )
+    for dim in scheme.dims:
+        idim = scheme.dims[dim]
+        affected = scheme.dm.__getattribute__(f"affected_faces_{dim}")
+        affected[...] = 0
+        affected[...] = np.maximum(
+            scheme.dm.theta[0][crop(ngh - 1, -ngh, idim)],
+            scheme.dm.theta[0][crop(ngh, -(ngh - 1), idim)],
+        )
 
 def detect_troubles(self: Simulator):
     if self.godunov:
@@ -10,20 +56,20 @@ def detect_troubles(self: Simulator):
     ngh=self.Nghc
     crop = lambda start,end,idim : crop_fv(start,end,idim,self.ndim,ngh)
     self.dm.troubles[...] = 0
-    W_old = self.compute_primitives_cv(self.dm.U_cv)
-    # W_old -> s.dm.M_fv
+    W_old = self.compute_primitives_cv(self.U_cv)
+    # W_old -> s.dm.M
     self.fill_active_region(W_old)
     W_new = self.compute_primitives_cv(self.dm.U_new)    
     ##############################################
     # NAD Check for numerically adimissible values
     ##############################################
     # First check if DMP criteria is met, if it is we can avoid computing alpha
-    self.fv_Boundaries(self.dm.M_fv)
-    W_max = self.dm.M_fv.copy()
-    W_min = self.dm.M_fv.copy()
+    self.Boundaries(self.dm.M)
+    W_max = self.dm.M.copy()
+    W_min = self.dm.M.copy()
     for idim in self.idims:
-        W_max = np.maximum(compute_W_max(self.dm.M_fv,idim),W_max)
-        W_min = np.minimum(compute_W_min(self.dm.M_fv,idim),W_min)
+        W_max = np.maximum(compute_W_max(self.dm.M,idim),W_max)
+        W_min = np.minimum(compute_W_min(self.dm.M,idim),W_min)
             
     W_max = self.crop(W_max,ngh=ngh)
     W_min = self.crop(W_min,ngh=ngh)
@@ -43,11 +89,11 @@ def detect_troubles(self: Simulator):
     # Now check for smooth extrema and relax the criteria for such cases
     if self.p > 1 and self.SED:
         self.fill_active_region(W_new)
-        self.fv_Boundaries(self.dm.M_fv)
+        self.Boundaries(self.dm.M)
         alpha = W_new*0 + 1
         for dim in self.dims:
             idim = self.dims[dim]
-            alpha_new = compute_smooth_extrema(self, self.dm.M_fv, dim)[crop(None,None,idim)]
+            alpha_new = compute_smooth_extrema(self, self.dm.M, dim)[crop(None,None,idim)]
             alpha = np.where(alpha_new < alpha, alpha_new, alpha)
 
         possible_trouble *= np.where(alpha<1, 1, 0)
@@ -72,10 +118,10 @@ def detect_troubles(self: Simulator):
             W_new[self._p_, ...] >= self.min_P, self.dm.troubles, 1)
 
     #self.n_troubles += self.dm.troubles.sum()
-    self.dm.M_fv[...] = 0
+    self.dm.M[...] = 0
     self.fill_active_region(self.dm.troubles)
-    self.fv_Boundaries(self.dm.M_fv,all=False)
-    trouble = self.dm.M_fv[0]
+    self.Boundaries(self.dm.M,all=False)
+    trouble = self.dm.M[0]
     self.dm.theta[0][...] = trouble
     theta = self.dm.theta[0]
 
