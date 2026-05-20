@@ -207,25 +207,6 @@ class SPD_Simulator(Simulator):
         self.ho_scheme.dm.switch_to(CupyLocation.host)
         self.lo_scheme.dm.switch_to(CupyLocation.host)
 
-    def init_sim(self):
-        self.checkpoint = False
-        self.switch_to_device()
-        self.create_dicts()
-        from timeit import default_timer as timer
-        self.execution_time = -timer()
-
-    def end_sim(self):
-        self.switch_to_host()
-        from timeit import default_timer as timer
-        self.execution_time += timer()
-        self.create_dicts()
-        self.convert_solution()
-        if self.rank == 0:
-            print(
-                f"t={self.time}, steps taken {self.n_step}, "
-                f"time taken {self.execution_time}"
-            )
-
     # ------------------------------------------------------------------
     # Potential and equilibrium
     # ------------------------------------------------------------------

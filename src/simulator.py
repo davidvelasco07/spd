@@ -424,36 +424,42 @@ class Simulator:
     # ----------------------------------------------------------------
     # Simulation lifecycle
     # ----------------------------------------------------------------
+    def switch_to_device(self):
+        self.dm.switch_to(CupyLocation.device)
+    
+    def switch_to_host(self):
+        self.dm.switch_to(CupyLocation.host)
 
     def init_sim(self):
         self.checkpoint = False
-        self.dm.switch_to(CupyLocation.device)
+        self.switch_to_device()
         self.create_dicts()
         self.execution_time = -timer()
 
     def end_sim(self):
-        self.dm.switch_to(CupyLocation.host)
+        self.switch_to_host()
         self.execution_time += timer()
         self.create_dicts()
         self.convert_solution()
         if self.rank == 0:
             print(
                 f"t={self.time}, steps taken {self.n_step}, "
-                f"time taken {self.execution_time}"
+                f"time taken {np.round(self.execution_time,3)}, bzcps = {np.round(self.zone_cycles/1E+9,3)}"
             )
 
     @property
     def elapsed_time(self):
-        return self.execution_time + timer()
+        return self.execution_time - timer()
 
     @property
     def cost_per_step(self):
-        cost = 0 if self.n_step == 0 else self.elapsed_time / self.n_step
+        cost = 0 if self.n_step == 0 else self.execution_time / self.n_step
         return cost
 
     @property
     def zone_cycles(self):
-        return self.cost_per_step * self.domain_size
+        #print(self.cost_per_step,self.domain_size, self.domain_size/self.cost_per_step)
+        return self.domain_size/self.cost_per_step
 
     def perform_update(self) -> bool:
         """
@@ -476,7 +482,7 @@ class Simulator:
         self.init_sim()
         while self.time < t_end:
             if not self.n_step % 100 and self.rank == 0 and self.verbose:
-                print(f"Time step #{self.n_step} (t = {self.time})", end="\r")
+                print(f"Time step #{self.n_step} (t = {np.round(self.time,3)})", end="\r")
             self.compute_dt()
             if self.time + self.dt >= t_end:
                 dt = t_end - self.time
