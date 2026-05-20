@@ -640,16 +640,18 @@ class InductionFV_Scheme(FV_Scheme):
                 )
 
     def ader_string(self) -> str:
+        # FV arrays are flat in space: (nader, Nz, Ny, Nx) in 3D.
         if self.ndim == 3:
-            return "zyxkji"
+            return "zyx"
         if self.ndim == 2:
-            return "yxji"
-        return "xi"
+            return "yx"
+        return "x"
 
     def _E0(self, E_ep: np.ndarray, ad: bool) -> np.ndarray:
         Ez = E_ep[0]
-        if ad and Ez.ndim > self.ndim:
-            return Ez[0, ...]
+        # In ADER mode keep the leading nader axis.
+        if ad:
+            return Ez
         return Ez
 
     def _diff_E0_to_bface(self, E_ep, E_edim: str, deriv_dim: str, b_dim: str, ad: bool):
@@ -668,7 +670,7 @@ class InductionFV_Scheme(FV_Scheme):
         sl_hi[ax] = slice(1, None)
         sl_lo[ax] = slice(None, -1)
         dE = (E0[tuple(sl_hi)] - E0[tuple(sl_lo)]) / self.h[deriv_dim]
-        tgt = self.B_fp[b_dim]
+        tgt = self.B_ader_fp[b_dim] if ad else self.B_fp[b_dim]
         if dE.shape != tgt.shape:
             raise RuntimeError(
                 f"Discrete curl shape mismatch for B{b_dim}: got {dE.shape}, "
@@ -679,7 +681,8 @@ class InductionFV_Scheme(FV_Scheme):
     def ader_dBdt(self, dim):
         ad = self._edges_use_ader()
         dim1, dim2 = self.other_dims(dim)
-        dBdt = self.dm.xp.zeros_like(self.B_fp[dim])
+        Btgt = self.B_ader_fp[dim] if ad else self.B_fp[dim]
+        dBdt = self.dm.xp.zeros_like(Btgt)
         if dim1 in self.Edims:
             dBdt += self._diff_E0_to_bface(
                 self.E_ader_ep[dim1], dim1, dim2, dim, ad

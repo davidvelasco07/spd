@@ -38,7 +38,7 @@ class FV_Simulator(Simulator):
         riemann_solver_fv: str = "llf",
         slope_limiter: str = "minmod",
         scheme: str = "MUSCL-Hancock",
-        time_integrator: str = "rk1",
+        time_integrator: str = "ader",
         *args,
         **kwargs,
     ):
