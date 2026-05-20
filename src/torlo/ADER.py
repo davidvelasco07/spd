@@ -1162,7 +1162,7 @@ def getADER_matrix(order, nodes_type, mp_flag=False):
     for M+1 nodes of type nodes_type, in multiple_precision if mp_flag==True
     returns nodes_poly, w_poly, M, RHSmat, bADER, evolMat
     nodes of lagr polynomials, their weights for a quadrature,
-    ADER matrix M to be inverted (phi_i(1)phi_j(1)-int_0^1 \dphi_i/dt phi_j)
+    ADER matrix M to be inverted (phi_i(1)phi_j(1)-int_0^1 \\dphi_i/dt phi_j)
     RHS matrix int_0^1 phi_i phi_j
     evolMat = ADER^-1*RHS
     """

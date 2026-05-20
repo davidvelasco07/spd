@@ -192,8 +192,10 @@ def MUSCL_Hancock_fluxes(self: Simulator,
     """
     dMhs={}
     S={}
-    nghc = getattr(self, "Nghc", 1)
-    crop = lambda start, end, idim: crop_fv(start, end, idim, self.ndim, nghc)
+    # Predictor arrays (dtM and directional gradients) live on the one-cell
+    # stripped stencil used by MUSCL-Hancock, independent of simulator Nghc.
+    # Using Nghc here over-crops transverse axes (e.g. 2D: 64x66 vs 66x66).
+    crop = lambda start, end, idim: crop_fv(start, end, idim, self.ndim, 1)
     for dim in self.dims:
         idim=self.dims[dim]
         dMh = self.compute_gradients(self.dm.M,idim)

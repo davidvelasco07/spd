@@ -307,10 +307,19 @@ class SPD_Simulator(Simulator):
         d = object.__getattribute__(self, '__dict__')
         ho = d.get('ho_scheme')
         lo = d.get('lo_scheme') # Fallback scheme
-        if ho is not None and hasattr(ho, name):
-            return getattr(ho, name)
-        if lo is not None and hasattr(lo, name):
-            return getattr(lo, name)
+        # Avoid recursive getattr loops between scheme<->sim proxying:
+        # inspect concrete attributes on the scheme objects without invoking
+        # their own __getattr__ fallbacks.
+        if ho is not None:
+            try:
+                return object.__getattribute__(ho, name)
+            except AttributeError:
+                pass
+        if lo is not None:
+            try:
+                return object.__getattribute__(lo, name)
+            except AttributeError:
+                pass
         raise AttributeError(
             f"'{type(self).__name__}' object has no attribute '{name}'"
         )

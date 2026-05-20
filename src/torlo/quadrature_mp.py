@@ -162,12 +162,16 @@ def lagrange_deriv(nodes,x,k):
     return f
 
 def sort_quad(nodes,weights):
-    idxs = np.argsort(nodes)
+    # ``nodes`` is an mpmath matrix (n x 1).  ``np.argsort(nodes)`` can return
+    # ndarray-valued indices, which are not valid mpmath matrix keys.
+    vals = [float(nodes[i, 0]) for i in range(nodes.rows)]
+    idxs = np.argsort(vals)
     nodes_new = mp.zeros(nodes.rows,nodes.cols)
     weights_new = mp.zeros(weights.rows,weights.cols)
     for i in range(len(nodes)):
-        nodes_new[i] = nodes[idxs[i],0]
-        weights_new[i] = weights[idxs[i],0]
+        j = int(idxs[i])
+        nodes_new[i] = nodes[j,0]
+        weights_new[i] = weights[j,0]
     return nodes_new, weights_new
 
 def lobatto(n):
