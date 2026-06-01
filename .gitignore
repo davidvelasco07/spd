@@ -9,3 +9,5 @@ test/core.*
 
 temp
 jobs
+
+**/*.egg-info
