@@ -1,5 +1,5 @@
 from mpmath import mp
-from precision_mp import precision
+from .precision_mp import precision
 mp.dps=precision
 
 legendre_roots = []

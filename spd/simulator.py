@@ -2,13 +2,13 @@ from typing import Callable, Tuple
 import numpy as np
 import os
 
-from runtime.data_management import GPUDataManager   # kept for lazy fallback
-from runtime.data_management import CupyLocation
+from .runtime.data_management import GPUDataManager   # kept for lazy fallback
+from .runtime.data_management import CupyLocation
 from timeit import default_timer as timer
-from runtime.comms import CommHelper
-from initial_conditions import sine_wave
-import hydro
-import mhd
+from .runtime.comms import CommHelper
+from .initial_conditions import sine_wave
+from . import hydro
+from .MHD import mhd
 
 
 class Simulator:
@@ -213,9 +213,9 @@ class Simulator:
     def select_integrator(self, time_integrator: str = None):
         if time_integrator is not None:
             self.time_integrator = time_integrator
-        from integrators.ader import ADER_Integrator
-        from integrators.rk import RK_Integrator
-        from integrators.rk_induction import InductionRKIntegrator
+        from .integrators.ader import ADER_Integrator
+        from .integrators.rk import RK_Integrator
+        from .integrators.rk_induction import InductionRKIntegrator
 
         integrator_key = (self.time_integrator or "ader").lower()
         if integrator_key == "ader":

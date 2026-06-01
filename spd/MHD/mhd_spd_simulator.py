@@ -4,10 +4,10 @@ MHD on SPD (SD + fallback) with coupled ADER predictor for fluid + induction.
 
 import numpy as np
 
-from sdfb_simulator import SPD_Simulator
-from induction.induction_sd_scheme import InductionSD_Scheme, MHDInductionSD_Scheme
-from riemann_solvers.riemann_solver_1D import Riemann_solver_1D as rs1d
-import mhd as mhd_eq
+from spd.sdfb_simulator import SPD_Simulator
+from spd.induction.induction_sd_scheme import InductionSD_Scheme, MHDInductionSD_Scheme
+from spd.riemann_solvers.riemann_solver_1D import Riemann_solver_1D as rs1d
+from . import mhd as mhd_eq
 
 
 class MHDCoupledScheme:

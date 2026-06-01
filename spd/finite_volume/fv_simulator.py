@@ -7,9 +7,9 @@ compatibility.  Creates an FV_Scheme and connects it to the Simulator.
 
 import numpy as np
 
-from simulator import Simulator
-from finite_volume.fv_scheme import FV_Scheme
-from numerics.polynomials import solution_points, flux_points
+from spd.simulator import Simulator
+from .fv_scheme import FV_Scheme
+from spd.numerics.polynomials import solution_points, flux_points
 
 
 class FV_Simulator(Simulator):

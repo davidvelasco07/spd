@@ -1,6 +1,6 @@
 import numpy as np
-import initial_conditions_1d as ic1d
-import initial_conditions_2d as ic2d
+from . import initial_conditions_1d as ic1d
+from . import initial_conditions_2d as ic2d
 
 def step_function(xyz: np.ndarray,case: int, vx=1, vy=1, vz=1, P=1):
     if xyz.shape[0]==1:

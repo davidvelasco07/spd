@@ -4,7 +4,7 @@ try:
 except:
     MPI_AVAILABLE = False
 import numpy as np
-from numerics.slicing import indices2,cuts
+from spd.numerics.slicing import indices2,cuts
 
 class CommHelper():
     def __init__(self,ndim,CUDA_AWARE=True):

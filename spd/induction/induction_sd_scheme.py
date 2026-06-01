@@ -9,9 +9,9 @@ from __future__ import annotations
 import os
 import numpy as np
 
-from numerics.polynomials import quadrature_mean
-from numerics.slicing import cut, indices, indices2
-from spectral_difference.sd_scheme import SD_Scheme
+from spd.numerics.polynomials import quadrature_mean
+from spd.numerics.slicing import cut, indices, indices2
+from spd.spectral_difference.sd_scheme import SD_Scheme
 
 
 class InductionSD_Scheme(SD_Scheme):

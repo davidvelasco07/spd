@@ -1,13 +1,8 @@
-import sys
-import os
-_torlo_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "torlo")
-if _torlo_dir not in sys.path:
-    sys.path.insert(0, _torlo_dir)
-from torlo.ADER import ADER
+from spd.torlo.ADER import ADER
 from .integrator import Integrator
 import numpy as np
-from numerics.polynomials import gauss_legendre_quadrature
-from numerics.polynomials import ader_matrix
+from spd.numerics.polynomials import gauss_legendre_quadrature
+from spd.numerics.polynomials import ader_matrix
 
 class ADER_Integrator(Integrator):
     def __init__(

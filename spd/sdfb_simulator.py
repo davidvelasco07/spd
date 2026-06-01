@@ -8,14 +8,14 @@ with trouble detection and flux blending.
 
 import numpy as np
 
-from simulator import Simulator
-from runtime.data_management import CupyLocation
-from spectral_difference.sd_scheme import SD_Scheme
-from finite_volume.fv_scheme import FV_Scheme
-from schemes.fallback import FallbackScheme
-from schemes.scheme import SemiDiscreteScheme
-from numerics.polynomials import quadrature_mean
-from numerics.slicing import cut, indices, indices2, crop_fv
+from .simulator import Simulator
+from .runtime.data_management import CupyLocation
+from .spectral_difference.sd_scheme import SD_Scheme
+from .finite_volume.fv_scheme import FV_Scheme
+from .schemes.fallback import FallbackScheme
+from .schemes.scheme import SemiDiscreteScheme
+from .numerics.polynomials import quadrature_mean
+from .numerics.slicing import cut, indices, indices2, crop_fv
 
 
 class SPD_Simulator(Simulator):

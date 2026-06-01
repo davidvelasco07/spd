@@ -1,6 +1,6 @@
 import numpy as np
-from simulator import Simulator
-from numerics.slicing import cut, crop_fv
+from .simulator import Simulator
+from .numerics.slicing import cut, crop_fv
 
 
 def detect_troubles_induction(

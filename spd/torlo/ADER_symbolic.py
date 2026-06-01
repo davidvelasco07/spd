@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from numpy.polynomial.legendre import leggauss
-from src.quadr import lglnodes,equispaced
+from .quadr import lglnodes,equispaced
 from scipy.interpolate import lagrange
 import sympy
 

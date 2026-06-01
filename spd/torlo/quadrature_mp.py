@@ -1,7 +1,7 @@
 from mpmath import mp
-from  precision_mp import precision
-from  lobatto_quadrature import get_quadrature as lobatto_quadrature
-from  legendre_quadrature import get_quadrature as legendre_quadrature
+from  .precision_mp import precision
+from  .lobatto_quadrature import get_quadrature as lobatto_quadrature
+from  .legendre_quadrature import get_quadrature as legendre_quadrature
 import numpy as np
 
 mp.dps=precision

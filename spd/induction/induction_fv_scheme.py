@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from finite_volume.fv_scheme import FV_Scheme
-from numerics.slicing import cut
+from spd.finite_volume.fv_scheme import FV_Scheme
+from spd.numerics.slicing import cut
 
 
 class InductionFV_Scheme(FV_Scheme):

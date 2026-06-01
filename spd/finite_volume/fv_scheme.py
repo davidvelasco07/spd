@@ -10,11 +10,11 @@ formulation dU/dt = L(U).
 import numpy as np
 from itertools import repeat
 
-from schemes.scheme import SemiDiscreteScheme
-from riemann_solvers.riemann_solver_1D import Riemann_solver_1D as rs1d
-from finite_volume import muscl
-from numerics.polynomials import quadrature_mean
-from numerics.slicing import cut, crop_fv
+from spd.schemes.scheme import SemiDiscreteScheme
+from spd.riemann_solvers.riemann_solver_1D import Riemann_solver_1D as rs1d
+from . import muscl
+from spd.numerics.polynomials import quadrature_mean
+from spd.numerics.slicing import cut, crop_fv
 
 
 class FV_Scheme(SemiDiscreteScheme):

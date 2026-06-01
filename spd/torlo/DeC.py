@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from numpy.polynomial.legendre import leggauss
-from quadr import lglnodes,equispaced
+from .quadr import lglnodes,equispaced
 
 class DeC:
     def __init__(self, M_sub, n_iter, nodes_type):

@@ -9,8 +9,8 @@ formulation dU/dt = L(U).
 
 import numpy as np
 
-from schemes.scheme import SemiDiscreteScheme
-from numerics.polynomials import (
+from spd.schemes.scheme import SemiDiscreteScheme
+from spd.numerics.polynomials import (
     solution_points,
     lagrange_matrix,
     lagrangeprime_matrix,
@@ -18,11 +18,11 @@ from numerics.polynomials import (
     quadrature_mean,
 )
 
-from riemann_solvers.riemann_solver_1D import Riemann_solver_1D as rs1d
-from numerics.transforms import compute_A_from_B, compute_A_from_B_full
-from numerics.slicing import indices2
-from spectral_difference import sd_boundary as bc
-from numerics.polynomials import gauss_legendre_quadrature, flux_points, solution_points 
+from spd.riemann_solvers.riemann_solver_1D import Riemann_solver_1D as rs1d
+from spd.numerics.transforms import compute_A_from_B, compute_A_from_B_full
+from spd.numerics.slicing import indices2
+from spd.spectral_difference import sd_boundary as bc
+from spd.numerics.polynomials import gauss_legendre_quadrature, flux_points, solution_points 
 
 class SD_Scheme(SemiDiscreteScheme):
     """

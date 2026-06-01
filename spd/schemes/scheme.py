@@ -18,7 +18,7 @@ Attribute Proxy Pattern:
 """
 
 import numpy as np
-from runtime.data_management import GPUDataManager
+from spd.runtime.data_management import GPUDataManager
 
 
 class SemiDiscreteScheme:

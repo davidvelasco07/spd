@@ -1,8 +1,8 @@
 import numpy as np
-from simulator import Simulator
+from spd.simulator import Simulator
 
-from numerics.slicing import cut
-from numerics.slicing import crop_fv
+from spd.numerics.slicing import cut
+from spd.numerics.slicing import crop_fv
 
 class Slope_limiter:
     def __init__(self,limiter):

@@ -5,10 +5,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    from spectral_difference.sd_simulator import SD_Simulator
-from numerics.slicing import cut
-from numerics.slicing import indices
-from numerics.slicing import indices2
+    from .sd_simulator import SD_Simulator
+from spd.numerics.slicing import cut
+from spd.numerics.slicing import indices
+from spd.numerics.slicing import indices2
    
 def store_interfaces(self: SD_Simulator,
                      M: np.ndarray,

@@ -1,11 +1,11 @@
 import numpy as np
 from itertools import repeat
 from collections import defaultdict
-from simulator import Simulator
-import riemann_solver as rs
-import muscl
+from .simulator import Simulator
+from .riemann_solvers import riemann_solver_1D as rs
+from .finite_volume import muscl
 
-from slicing import cut, crop_fv
+from .numerics.slicing import cut, crop_fv
 
 class FV_Simulator(Simulator):
     def __init__(
@@ -16,7 +16,7 @@ class FV_Simulator(Simulator):
         *args,
         **kwargs):
         super().__init__(*args, **kwargs)
-        self.riemann_solver_fv = rs.Riemann_solver(riemann_solver_fv).solver
+        self.riemann_solver_fv = rs.Riemann_solver_1D(riemann_solver_fv, self.soe).solver
         self.predictor = predictor
         self.slope_limiter = muscl.Slope_limiter(slope_limiter)
         self.fv_scheme = muscl.MUSCL_Hancock_fluxes if predictor else muscl.MUSCL_fluxes

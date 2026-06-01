@@ -1,8 +1,8 @@
 import numpy as np
-from hydro import hydro
-from hydro import riemann_solver as rs
-from mhd import mhd
-from mhd import riemann_solver as mrs    
+from spd import hydro
+from spd.hydro import riemann_solver as rs
+from spd.MHD import mhd
+from spd.MHD import riemann_solver as mrs    
 
 class Riemann_solver_1D:
     def __init__(self,name, soe):

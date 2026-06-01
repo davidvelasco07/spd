@@ -7,7 +7,7 @@ Passive scalars and thermal diffusion are handled outside this module.
 
 import numpy as np
 
-from runtime.gpu import CUPY_AVAILABLE, fuse, is_gpu_array
+from spd.runtime.gpu import CUPY_AVAILABLE, fuse, is_gpu_array
 
 if CUPY_AVAILABLE:
     import cupy as cp

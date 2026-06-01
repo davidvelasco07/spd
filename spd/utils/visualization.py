@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
-from simulator import Simulator
+from spd.simulator import Simulator
 from typing import List, Optional, Tuple
 
 def plot_fields(s: Simulator,

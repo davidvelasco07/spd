@@ -7,8 +7,8 @@ compatibility.  Creates an SD_Scheme and connects it to the Simulator.
 
 import numpy as np
 
-from simulator import Simulator
-from spectral_difference.sd_scheme import SD_Scheme
+from spd.simulator import Simulator
+from .sd_scheme import SD_Scheme
 
 
 class SD_Simulator(Simulator):

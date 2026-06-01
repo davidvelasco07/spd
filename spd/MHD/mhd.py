@@ -1,5 +1,5 @@
 import numpy as np
-from hydro import hydro
+from spd import hydro
 
 def compute_fast_vel(p,rho,Bn,Bt1,Bt2,gamma,min_c2):
     B2 = Bn**2+Bt1**2+Bt2**2

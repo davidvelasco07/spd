@@ -5,10 +5,10 @@ Pure induction driver: SD constrained transport + ADER or induction RK.
 import os
 import numpy as np
 
-from simulator import Simulator
-from induction.induction_sd_scheme import InductionSD_Scheme
-from induction.induction_fv_scheme import InductionFV_Scheme
-from induction.induction_fallback import InductionFallbackScheme
+from spd.simulator import Simulator
+from .induction_sd_scheme import InductionSD_Scheme
+from .induction_fv_scheme import InductionFV_Scheme
+from .induction_fallback import InductionFallbackScheme
 
 
 class InductionSimulator(Simulator):

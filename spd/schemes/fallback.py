@@ -12,10 +12,10 @@ Can operate in two modes:
 
 import numpy as np
 
-from schemes.scheme import SemiDiscreteScheme
-from finite_volume.fv_scheme import FV_Scheme
-from trouble_detection import detect_troubles
-from numerics.slicing import cut, indices, indices2, crop_fv
+from .scheme import SemiDiscreteScheme
+from spd.finite_volume.fv_scheme import FV_Scheme
+from spd.trouble_detection import detect_troubles
+from spd.numerics.slicing import cut, indices, indices2, crop_fv
 
 
 class FallbackScheme(FV_Scheme):
