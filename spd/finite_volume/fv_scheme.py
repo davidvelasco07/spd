@@ -604,7 +604,10 @@ class FV_Scheme(SemiDiscreteScheme):
                 self.BC_fp[dim][side] = M[cuts[side]]
             elif BC[side] == "reflective":
                 if all:
-                    self.BC_fp[dim][side] = M[cuts[1 - side]]
+                    reverse = (Ellipsis, slice(None, None, -1)) + tuple(
+                        repeat(slice(None), idim)
+                    )
+                    self.BC_fp[dim][side] = M[cuts[1 - side]][reverse]
                     self.BC_fp[dim][side][self.vels[idim]] *= -1
             elif BC[side] == "gradfree":
                 if all:
