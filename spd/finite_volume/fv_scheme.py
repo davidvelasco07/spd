@@ -511,9 +511,9 @@ class FV_Scheme(SemiDiscreteScheme):
 
     def compute_update(self, U, ader=False, prims=False, **kwargs):
         """Evaluate the spatial RHS for a given state U."""
-        self.W_cv = self.compute_primitives(U)
+        self.compute_primitives(U, W=self.W_cv)
         self.compute_fluxes(self.F_fp, self.dt)
-        return self.compute_dudt(self.W_cv, ader=ader)
+        return self.compute_dudt(U, ader=ader)
 
     def switch_to_finite_volume(self):
         """Switch to finite volume representation."""
@@ -544,7 +544,7 @@ class FV_Scheme(SemiDiscreteScheme):
 
     def post_update(self):
         """Called after time integrator step: update primitives."""
-        self.W_cv = self.compute_primitives(self.U_cv)
+        self.compute_primitives(self.U_cv, W=self.W_cv)
 
     def update(self):
         """Perform a single FV update (no integrator, Euler-forward style)."""
