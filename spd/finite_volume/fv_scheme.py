@@ -203,7 +203,7 @@ class FV_Scheme(SemiDiscreteScheme):
         W_gh = self.array(nvar, ngh=ngh)
         for var in range(nvar):
             W_gh[var] = quadrature_mean(
-                self.mesh_cv, self.init_fct, self.ndim, self.p, var
+                self.mesh_cv, self.init_fct, self.ndim, 0, var
             )
         # Ghosted primitives live on the data manager so host/device follows
         # ``dm.switch_to`` (same as ``W_cv`` / ``U_cv``); do not keep a separate
