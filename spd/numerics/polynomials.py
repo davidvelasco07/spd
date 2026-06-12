@@ -144,11 +144,11 @@ def quadrature_mean(
     d : int
         Number of spatial dimensions.
     p : int
-        Polynomial degree; ``p + 1`` quadrature points are used per dimension.
+        Polynomial degree; ``p // 2 + 1`` quadrature points are used per dimension.
     v : int
         Variable index passed to *fct*.
     """
-    n = p + 1
+    n = p // 2 + 1
     x, w = gauss_legendre_quadrature(0.0, 1.0, n)
     pts = mesh[(Ellipsis,) + (slice(-1),)*d + (np.newaxis,)*d]
     pts = np.broadcast_to(pts, pts.shape[:-d] + (n,)*d).copy()
