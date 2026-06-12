@@ -488,6 +488,7 @@ class Simulator:
                 dt = t_end - self.time
                 if dt > 1e-14:
                     self.dt = dt
+                    self.scheme.dt = dt
                 else:
                     print(f"dt={dt}")
                     break
