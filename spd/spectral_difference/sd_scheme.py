@@ -586,10 +586,11 @@ class SD_Scheme(SemiDiscreteScheme):
     # SD ↔ FV representation switching
     # ----------------------------------------------------------------
 
-    def switch_to_finite_volume(self, integrate_faces=True, ader=False):
+    def switch_to_finite_volume(self, integrate_faces=True, ader=False, U_sp=None):
         """Convert SD element-based arrays to FV cell-based layout."""
         # Compute control volume averages
-        self.dm.U_cv[...] = self.compute_cv_from_sp(self.dm.U_sp)
+        U_sp = self.dm.U_sp if U_sp is None else U_sp
+        self.dm.U_cv[...] = self.compute_cv_from_sp(U_sp)
         # Change to Finite Volume layout
         self.dm.U_cv = self.transpose_to_fv(self.dm.U_cv)
         self.dm.W_cv = self.transpose_to_fv(self.dm.W_cv)
@@ -601,14 +602,15 @@ class SD_Scheme(SemiDiscreteScheme):
                     self.F_fp[dim], dim, ader=ader
                 )
 
-    def switch_to_high_order(self):
+    def switch_to_high_order(self, update_solution_points=True):
         """Convert FV cell-based arrays back to SD element-based layout."""
         self.dm.U_cv = self.transpose_to_sd(self.dm.U_cv)
         self.dm.W_cv = self.transpose_to_sd(self.dm.W_cv)
         if self.WB:
             self.dm.U_eq_cv = self.transpose_to_sd(self.dm.U_eq_cv)
         # Compute solution at solution points
-        self.dm.U_sp[...] = self.compute_sp_from_cv(self.dm.U_cv)
+        if update_solution_points:
+            self.dm.U_sp[...] = self.compute_sp_from_cv(self.dm.U_cv)
 
     # ----------------------------------------------------------------
     # Potential and equilibrium

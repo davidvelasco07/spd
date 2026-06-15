@@ -278,14 +278,16 @@ class FallbackScheme(FV_Scheme):
             return super().compute_update(U, ader=ader, prims=prims, **kwargs)
 
         self.primary.solve_faces(U, ader=ader, prims=prims)
-        self.switch_to_finite_volume()
+        self.primary.switch_to_finite_volume(U_sp=U)
+        self.working_arrays()
         self.store_high_order_fluxes(0, ader=ader)
         self.compute_corrected_fluxes(self.dt)
         # Compute dU/dt in FV layout, then reshape to primary (SD) layout
         dUdt_fv = self.compute_dudt(self.U_cv)
         dUdt_sd = self.primary.transpose_to_sd(dUdt_fv)
         dUdt_sd = self.primary.compute_sp_from_cv(dUdt_sd)
-        self.switch_to_high_order()
+        self.primary.switch_to_high_order(update_solution_points=False)
+        self.working_arrays()
         return dUdt_sd
 
     def ader_predictor(self, prims: bool = False) -> None:
