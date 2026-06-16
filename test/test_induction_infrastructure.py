@@ -4,11 +4,11 @@ import unittest
 
 import numpy as np
 
-from induction.induction_sd_scheme import InductionSD_Scheme, MHDInductionSD_Scheme
-from induction.induction_fv_scheme import InductionFV_Scheme
-from induction.induction_simulator import InductionSimulator
-from integrators.rk_induction import InductionRKIntegrator
-from finite_volume.fv_scheme import FV_Scheme
+from spd.induction.induction_sd_scheme import InductionSD_Scheme, MHDInductionSD_Scheme
+from spd.induction.induction_fv_scheme import InductionFV_Scheme
+from spd.induction.induction_simulator import InductionSimulator
+from spd.integrators.rk_induction import InductionRKIntegrator
+from spd.finite_volume.fv_scheme import FV_Scheme
 
 
 def _torus_init(mesh, var):

@@ -1,8 +1,6 @@
 import pytest
-import sys
 import numpy as np
-sys.path.append("../src")
-from sdfb_simulator import SDFB_Simulator
+from spd.sdfb_simulator import SDFB_Simulator
 
 tolerance=1E-14
 N=6

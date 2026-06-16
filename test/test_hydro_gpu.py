@@ -1,16 +1,12 @@
 """NumPy vs CuPy parity for hydro GPU kernels."""
 
-import sys
-
 import numpy as np
 import pytest
-
-sys.path.append("../src")
 
 pytest.importorskip("cupy")
 import cupy as cp
 
-from hydro import hydro
+from spd import hydro
 
 
 GAMMA = 1.4

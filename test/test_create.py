@@ -1,11 +1,9 @@
 import pytest
-import sys
 import numpy as np
-sys.path.append("../src")
-from simulator import Simulator
-from spectral_difference.sd_simulator import SD_Simulator
-from finite_volume.fv_simulator import FV_Simulator
-from sdfb_simulator import SDFB_Simulator
+from spd.simulator import Simulator
+from spd.spectral_difference.sd_simulator import SD_Simulator
+from spd.finite_volume.fv_simulator import FV_Simulator
+from spd.sdfb_simulator import SDFB_Simulator
 
 N=6
 
