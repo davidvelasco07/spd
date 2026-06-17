@@ -1,6 +1,6 @@
 import numpy as np
-from .simulator import Simulator
-from .numerics.slicing import cut, crop_fv
+from spd.simulator import Simulator
+from spd.numerics.slicing import cut, crop_fv
 
 
 def detect_troubles_induction(
@@ -67,10 +67,20 @@ def detect_troubles(self: Simulator):
     self.Boundaries(self.dm.M)
     W_max = self.dm.M.copy()
     W_min = self.dm.M.copy()
-    for idim in self.idims:
-        W_max = np.maximum(compute_W_max(self.dm.M,idim),W_max)
-        W_min = np.minimum(compute_W_min(self.dm.M,idim),W_min)
-            
+    if getattr(self, "NAD_neighbors", "1st") == "2nd":
+        # 2nd neighbors -> Moore (box) neighborhood: chain the extrema so each
+        # successive dimension operates on the already-extended array, which
+        # pulls in the diagonal ("second") neighbors as well as the faces.
+        for idim in self.idims:
+            W_max = compute_W_max(W_max, idim)
+            W_min = compute_W_min(W_min, idim)
+    else:
+        # 1st neighbors -> von Neumann (cross) neighborhood: per-dimension
+        # extrema combined, i.e. only the face-adjacent neighbors.
+        for idim in self.idims:
+            W_max = np.maximum(compute_W_max(self.dm.M,idim),W_max)
+            W_min = np.minimum(compute_W_min(self.dm.M,idim),W_min)
+
     W_max = self.crop(W_max,ngh=ngh)
     W_min = self.crop(W_min,ngh=ngh)
     

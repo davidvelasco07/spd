@@ -12,7 +12,7 @@ from .simulator import Simulator
 from .runtime.data_management import CupyLocation
 from .spectral_difference.sd_scheme import SD_Scheme
 from .finite_volume.fv_scheme import FV_Scheme
-from .schemes.fallback import FallbackScheme
+from .fallback import FallbackScheme
 from .schemes.scheme import SemiDiscreteScheme
 
 
@@ -33,7 +33,10 @@ class SPD_Simulator(Simulator):
     SED : bool
         Enable smooth extrema detection.
     NAD : str
-        NAD mode ('' or 'delta').
+        NAD tolerance mode ('' for relative, 'delta' for range-scaled).
+    NAD_neighbors : str
+        DMP stencil for the NAD bounds: '1st' (von Neumann / face neighbors)
+        or '2nd' (Moore / box neighborhood, includes diagonal neighbors).
     PAD : bool
         Enable physically admissible detection.
     blending : bool
@@ -60,6 +63,7 @@ class SPD_Simulator(Simulator):
         tolerance: float = 1e-5,
         SED: bool = True,
         NAD: str = "",
+        NAD_neighbors: str = "2nd",
         PAD: bool = True,
         blending: bool = True,
         min_rho: float = 1e-10,
@@ -89,6 +93,7 @@ class SPD_Simulator(Simulator):
             tolerance=tolerance,
             SED=SED,
             NAD=NAD,
+            NAD_neighbors=NAD_neighbors,
             PAD=PAD,
             blending=blending,
             min_rho=min_rho,

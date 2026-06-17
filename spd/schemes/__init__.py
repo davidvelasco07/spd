@@ -2,6 +2,7 @@
 
 from .scheme import SemiDiscreteScheme
 
-# FallbackScheme is imported lazily to avoid circular imports
-# with finite_volume.fv_scheme:
-#   from schemes.fallback import FallbackScheme
+# FallbackScheme now lives in the dedicated ``spd.fallback`` package
+# (alongside trouble detection) to avoid circular imports with
+# finite_volume.fv_scheme:
+#   from spd.fallback import FallbackScheme

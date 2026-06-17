@@ -5,7 +5,7 @@ reduced high-order magnetic update on affected faces.
 
 import numpy as np
 
-from spd.trouble_detection import detect_troubles_induction
+from spd.fallback.trouble_detection import detect_troubles_induction
 
 
 class InductionFallbackScheme:

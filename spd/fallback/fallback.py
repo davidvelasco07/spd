@@ -12,9 +12,9 @@ Can operate in two modes:
 
 import numpy as np
 
-from .scheme import SemiDiscreteScheme
+from spd.schemes.scheme import SemiDiscreteScheme
 from spd.finite_volume.fv_scheme import FV_Scheme
-from spd.trouble_detection import detect_troubles
+from .trouble_detection import detect_troubles
 from spd.numerics.slicing import cut, indices, indices2, crop_fv
 from spd.numerics.polynomials import quadrature_mean
 
@@ -47,7 +47,10 @@ class FallbackScheme(FV_Scheme):
     SED : bool
         Enable smooth extrema detection.
     NAD : str
-        NAD mode ('' or 'delta').
+        NAD tolerance mode ('' for relative, 'delta' for range-scaled).
+    NAD_neighbors : str
+        DMP stencil for the NAD bounds: '1st' (von Neumann / face neighbors)
+        or '2nd' (Moore / box neighborhood, includes diagonal neighbors).
     PAD : bool
         Enable physically admissible detection.
     blending : bool
@@ -71,6 +74,7 @@ class FallbackScheme(FV_Scheme):
         tolerance=1e-5,
         SED=True,
         NAD="",
+        NAD_neighbors="2nd",
         PAD=True,
         blending=True,
         min_rho=1e-10,
@@ -92,6 +96,7 @@ class FallbackScheme(FV_Scheme):
         self.tolerance = tolerance
         self.SED = SED
         self.NAD = NAD
+        self.NAD_neighbors = NAD_neighbors
         self.PAD = PAD
         self.blending = blending
         self.min_rho = min_rho
