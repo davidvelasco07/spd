@@ -130,7 +130,7 @@ def detect_troubles(self: Simulator):
     #self.n_troubles += self.dm.troubles.sum()
     self.dm.M[...] = 0
     self.fill_active_region(self.dm.troubles)
-    self.Boundaries(self.dm.M,all=False)
+    self.Boundaries_scalar(self.dm.M)
     trouble = self.dm.M[0]
     self.dm.theta[0][...] = trouble
     theta = self.dm.theta[0]

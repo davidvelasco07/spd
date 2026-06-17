@@ -1,5 +1,63 @@
 import numpy as np
 
+# ----------------------------------------------------------------------
+# Double Mach Reflection (Woodward & Colella 1984)
+# ----------------------------------------------------------------------
+# A Mach-10 shock in gamma=1.4 air meets a reflecting wall.  The shock
+# starts at x = DMR_XC on the bottom boundary, inclined at DMR_ANGLE to
+# the wall.  These constants are shared by the initial condition and the
+# "doublemach" boundary conditions.
+DMR_XC = 1.0 / 6.0           # shock foot on the bottom wall
+DMR_ANGLE = np.pi / 3.0      # 60 degrees from the x-axis
+DMR_SHOCK_SPEED = 10.0       # shock speed factor used for the moving trace
+
+
+def dmr_post_shock(gamma=1.4):
+    """Post-shock primitive state behind the Mach-10 shock."""
+    return dict(
+        rho=8.0,
+        vx=8.25 * np.cos(np.pi / 6),   # 8.25 * cos(30 deg) ~ 7.1447
+        vy=-8.25 * np.sin(np.pi / 6),  # -8.25 * sin(30 deg) = -4.125
+        P=116.5,
+    )
+
+
+def dmr_ambient(gamma=1.4):
+    """Undisturbed (ahead-of-shock) primitive state."""
+    return dict(rho=1.4, vx=0.0, vy=0.0, P=1.0)
+
+
+def dmr_shock_x(t, y, xc=DMR_XC, angle=DMR_ANGLE, speed=DMR_SHOCK_SPEED):
+    """x-position of the (tilted, moving) shock front at height ``y``/time ``t``."""
+    return speed * t / np.sin(angle) + xc + y / np.tan(angle)
+
+
+def double_mach_reflection(
+    xy: np.ndarray, case: int, gamma=1.4
+) -> np.ndarray:
+    """Initial condition for the Double Mach Reflection problem.
+
+    Behind the initial shock line ``x < xc + y/tan(angle)`` the flow is in
+    the post-shock state; ahead of it the flow is at rest (ambient).
+    Recommended domain: ``[0, 4] x [0, 1]``.
+    """
+    x = xy[0]
+    y = xy[1]
+    behind = x < (DMR_XC + y / np.tan(DMR_ANGLE))
+    ps = dmr_post_shock(gamma)
+    am = dmr_ambient(gamma)
+    if case == 0:
+        return np.where(behind, ps["rho"], am["rho"])
+    elif case == 1:
+        return np.where(behind, ps["vx"], am["vx"])
+    elif case == 2:
+        return np.where(behind, ps["vy"], am["vy"])
+    elif case == 4:
+        return np.where(behind, ps["P"], am["P"])
+    else:
+        return np.zeros(x.shape)
+
+
 def step_function(xy: np.ndarray,case: int, vx=1, vy=1, P=1):
     x=xy[0]
     y=xy[1]

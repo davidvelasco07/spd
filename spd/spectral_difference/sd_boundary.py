@@ -60,8 +60,82 @@ def store_BC(self: SD_Simulator,
         elif BC[side] == "pressure":
             #Overwrite solution with ICs
             M[indices2(-side,self.ndim,idim)] = BC_array[side]
+        elif BC[side] == "doublemach":
+            store_doublemach_BC(self, BC_array, M, dim, side)
         else:
             raise("Undetermined boundary type")
+
+
+def _dmr_conservative(self, primitive_state, nd):
+    """Conservative state vector (length nvar) broadcast over nd axes.
+
+    SD flux-point boundaries operate on conservative variables.
+    """
+    xp = self.dm.xp
+    rho = primitive_state["rho"]
+    vx, vy, P = primitive_state["vx"], primitive_state["vy"], primitive_state["P"]
+    U = xp.zeros(self.nvar)
+    U[self._d_] = rho
+    U[self.vels[0]] = rho * vx
+    U[self.vels[1]] = rho * vy
+    U[self._p_] = P / (self.gamma - 1) + 0.5 * rho * (vx ** 2 + vy ** 2)
+    return U.reshape((self.nvar,) + (1,) * (nd - 1))
+
+
+def store_doublemach_BC(self: SD_Simulator,
+                        BC_array: np.ndarray,
+                        M: np.ndarray,
+                        dim: str,
+                        side: int) -> None:
+    """Double Mach Reflection boundary for the SD flux-point arrays.
+
+    x: left = inflow (post-shock state), right = outflow.
+    y: lower = reflecting wall for x >= xc, post-shock state for x < xc;
+       upper = the (moving, tilted) shock state for x < x_s(t), ambient
+       otherwise.
+
+    The post-shock / ambient states are imposed explicitly so the BC is
+    self-contained (it does not rely on frozen IC ghost values).
+    """
+    from spd.initial_conditions.initial_conditions_2d import (
+        DMR_XC,
+        DMR_ANGLE,
+        DMR_SHOCK_SPEED,
+        dmr_post_shock,
+        dmr_ambient,
+    )
+
+    xp = self.dm.xp
+    idim = self.dims[dim]
+    nd = BC_array[side].ndim
+    post = _dmr_conservative(self, dmr_post_shock(self.gamma), nd)
+
+    if dim == "x":
+        # Left = inflow (post-shock); right = outflow (zero-gradient copy).
+        if side == 0:
+            BC_array[0] = post
+        else:
+            BC_array[1] = M[indices2(-1, self.ndim, idim)]
+        return
+
+    # dim == "y"
+    x_sp = self.dm.X_sp                    # (N_x, p+1)
+    xb = x_sp.reshape((1,) * (nd - 2) + x_sp.shape)
+    xc = getattr(self, "dmr_xc", DMR_XC)
+
+    if side == 0:
+        # Reflecting wall for x >= xc; post-shock inflow for x < xc.
+        refl = M[indices2(0, self.ndim, idim)].copy()
+        refl[self.vels[idim]] *= -1
+        BC_array[0] = xp.where(xb >= xc, refl, post)
+    else:
+        angle = getattr(self, "dmr_angle", DMR_ANGLE)
+        speed = getattr(self, "dmr_shock_speed", DMR_SHOCK_SPEED)
+        t = float(self.time)
+        ytop = self.lim["y"][1]           # upper boundary flux points sit at y = ytop
+        x_s = speed * t / np.sin(angle) + xc + ytop / np.tan(angle)
+        ambient = _dmr_conservative(self, dmr_ambient(self.gamma), nd)
+        BC_array[1] = xp.where(xb < x_s, post, ambient)
                          
 def apply_BC(self: SD_Simulator,
              dim: str) -> None:

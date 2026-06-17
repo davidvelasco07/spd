@@ -721,8 +721,87 @@ class FV_Scheme(SemiDiscreteScheme):
             elif BC[side] == "eq":
                 if all:
                     self.BC_fp[dim][side][...] = 0
+            elif BC[side] == "doublemach":
+                if all:
+                    self._store_doublemach_BC(M, dim, side)
             else:
                 raise ("Undetermined boundary type")
+
+    # ----------------------------------------------------------------
+    # Double Mach Reflection boundary (Woodward & Colella)
+    # ----------------------------------------------------------------
+
+    def _dmr_state(self, primitive_state, nd):
+        """Build a length-``nvar`` primitive vector broadcast over ``nd`` axes.
+
+        FV boundaries operate on primitive variables.
+        """
+        xp = self.dm.xp
+        vec = xp.zeros(self.nvar)
+        vec[self._d_] = primitive_state["rho"]
+        vec[self.vels[0]] = primitive_state["vx"]
+        vec[self.vels[1]] = primitive_state["vy"]
+        vec[self._p_] = primitive_state["P"]
+        return vec.reshape((self.nvar,) + (1,) * (nd - 1))
+
+    def _store_doublemach_BC(self, M, dim, side):
+        """Fill ``BC_fp`` for the Double Mach Reflection boundary.
+
+        x: left = inflow (post-shock state), right = outflow.
+        y: lower = reflecting wall for x >= xc, post-shock state for x < xc;
+           upper = the (moving, tilted) shock state for x < x_s(t), ambient
+           otherwise.
+
+        The post-shock / ambient states are imposed explicitly (rather than
+        relying on frozen IC ghost values) so the BC is self-contained.
+        """
+        from spd.initial_conditions.initial_conditions_2d import (
+            DMR_XC,
+            DMR_ANGLE,
+            DMR_SHOCK_SPEED,
+            dmr_post_shock,
+            dmr_ambient,
+        )
+
+        xp = self.dm.xp
+        ngh = self.Nghc
+        idim = self.dims[dim]
+        BCfp = self.BC_fp[dim][side]
+        nd = BCfp.ndim
+        # interior ngh-layer adjacent to this boundary
+        cuts = (cut(-2 * ngh, -ngh, idim), cut(ngh, 2 * ngh, idim))
+        post = self._dmr_state(dmr_post_shock(self.gamma), nd)
+
+        if dim == "x":
+            # Left = inflow (post-shock); right = outflow (zero-gradient copy).
+            if side == 0:
+                BCfp[...] = post
+            else:
+                BCfp[...] = M[cuts[1 - side]]
+            return
+
+        # dim == "y"
+        xc = getattr(self, "dmr_xc", DMR_XC)
+        x = xp.asarray(self.centers["x"])  # full x incl. ghosts (last axis of BCfp)
+        xb = x.reshape((1,) * (nd - 1) + x.shape)
+
+        if side == 0:
+            # Reflecting wall for x >= xc; post-shock inflow for x < xc.
+            reverse = (Ellipsis, slice(None, None, -1)) + tuple(
+                repeat(slice(None), idim)
+            )
+            refl = M[cuts[1 - side]][reverse].copy()
+            refl[self.vels[idim]] *= -1
+            BCfp[...] = xp.where(xb >= xc, refl, post)
+        else:
+            angle = getattr(self, "dmr_angle", DMR_ANGLE)
+            speed = getattr(self, "dmr_shock_speed", DMR_SHOCK_SPEED)
+            t = float(self.time)
+            y = xp.asarray(self.centers["y"])[-ngh:]  # y of the upper ghost rows
+            yb = y.reshape((1,) * (nd - 2) + (ngh, 1))
+            x_s = speed * t / np.sin(angle) + xc + yb / np.tan(angle)
+            ambient = self._dmr_state(dmr_ambient(self.gamma), nd)
+            BCfp[...] = xp.where(xb < x_s, post, ambient)
 
     def apply_BC(self, dim: str) -> None:
         """Fills ghost cells in M_fv from stored boundary values."""
@@ -737,6 +816,39 @@ class FV_Scheme(SemiDiscreteScheme):
             self.store_BC(M, dim, all)
             self.Comms(M, dim)
             self.apply_BC(dim)
+
+    def Boundaries_scalar(self, M: np.ndarray):
+        """Fill ghost cells for an auxiliary scalar field (e.g. the trouble
+        indicator) **without** touching the solution ``BC_fp`` buffer.
+
+        Periodic boundaries wrap around (with MPI halo exchange); every
+        physical boundary uses a zero-gradient (copy-interior) extrapolation.
+
+        This is deliberately separate from :meth:`Boundaries`: the solution
+        ``BC_fp`` holds the (variable-dependent) boundary *state*, which is
+        only meaningful for the full primitive field.  Reusing it for the
+        trouble field leaks that state into the flags -- e.g. the Double Mach
+        Reflection post-shock density (8) would appear as ``theta``/
+        ``affected_faces`` of 8 on boundary faces and make ``correct_fluxes``
+        amplify (rather than replace) the high-order flux there.
+        """
+        ngh = self.Nghc
+        if getattr(self, "BC_fp_scalar", None) is None:
+            self.BC_fp_scalar = {d: self.array_BC(dim=d) for d in self.dims}
+        for dim in self.dims:
+            idim = self.dims[dim]
+            BC = self.BC[dim]
+            bc = self.BC_fp_scalar[dim]
+            cuts = (cut(-2 * ngh, -ngh, idim), cut(ngh, 2 * ngh, idim))
+            for side in [0, 1]:
+                if BC[side] == "periodic":
+                    bc[side] = M[cuts[side]]
+                else:
+                    # zero-gradient: copy the nearest interior layer
+                    bc[side] = M[cuts[1 - side]]
+            self.comms.Comms_fv(self.dm, M, self.BC_fp_scalar, idim, dim, ngh)
+            M[cut(None, ngh, idim)] = bc[0]
+            M[cut(-ngh, None, idim)] = bc[1]
 
     def Comms(self, M: np.ndarray, dim: str):
         comms = self.comms
