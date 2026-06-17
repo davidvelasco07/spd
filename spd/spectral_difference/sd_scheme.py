@@ -20,7 +20,7 @@ from spd.numerics.polynomials import (
 
 from spd.riemann_solvers.riemann_solver_1D import Riemann_solver_1D as rs1d
 from spd.numerics.transforms import compute_A_from_B, compute_A_from_B_full
-from spd.numerics.slicing import indices2
+from spd.numerics.slicing import cut, indices, indices2
 from spd.spectral_difference import sd_boundary as bc
 from spd.numerics.polynomials import gauss_legendre_quadrature, flux_points, solution_points 
 
@@ -460,7 +460,10 @@ class SD_Scheme(SemiDiscreteScheme):
     def solve_faces(self, M, prims=False, ader=True) -> None:
         """Compute fluxes at faces by interpolating to flux points,
         computing physical fluxes, and solving the Riemann problem."""
-        na = np.newaxis
+        # The equilibrium arrays are time-independent: broadcast them over the
+        # ADER time-points axis (newaxis), but add them directly under RK
+        # (ader=False), where the flux-point state carries no such axis.
+        na = np.newaxis if ader else Ellipsis
         for key in self.idims:
             dim = self.idims[key]
             vels = np.roll(self.vels, -key)
@@ -630,14 +633,34 @@ class SD_Scheme(SemiDiscreteScheme):
             ) / self.h[dim]
 
     def init_equilibrium_state(self) -> None:
-        W_sp = self.compute_sp_from_cv(self.dm.W_cv)
+        nvar = self.nvar
+        ngh = self.Nghe
+        # Sample the equilibrium primitives from the dedicated equilibrium
+        # function ``eq_fct`` (as in main), not from the initial condition.
+        W_gh = self.array_sp(ngh=ngh)
+        for var in range(nvar):
+            W_gh[var] = quadrature_mean(
+                self.mesh_cv, self.eq_fct, self.ndim, self.p, var
+            )
+        W_sp = self.compute_sp_from_cv(W_gh)
         U_sp = self.compute_conservatives(W_sp)
         self.dm.U_eq_sp = self.crop(U_sp)
         self.dm.U_eq_cv = self.compute_cv_from_sp(self.dm.U_eq_sp)
         for dim in self.dims:
             idim = self.dims[dim]
             vels = np.roll(self.vels, -idim)
+            U = self.compute_fp_from_sp(U_sp, dim)
+            self.dm.__setattr__(f"M_eq_fp_{dim}", self.crop(U))
             M_fp = self.dm.__getattribute__(f"M_eq_fp_{dim}")
+            # Force equilibrium flux-point values to match across element
+            # interfaces so the perturbation flux vanishes at equilibrium.
+            M_fp[cut(1, None, idim + self.ndim)][indices(0, idim)] = M_fp[
+                cut(None, -1, idim + self.ndim)
+            ][indices(-1, idim)]
+            F = U.copy()
+            W = self.compute_primitives(U)
+            self.compute_fluxes(F, W, vels, prims=True)
+            self.dm.__setattr__(f"F_eq_fp_{dim}", self.crop(F))
 
     # ----------------------------------------------------------------
     # Communication

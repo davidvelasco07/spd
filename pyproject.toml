@@ -11,5 +11,5 @@ dependencies = [
     "numpy",
 ]
 
-[tool.setuptools]
-packages = ["spd"]
+[tool.setuptools.packages.find]
+include = ["spd*"]

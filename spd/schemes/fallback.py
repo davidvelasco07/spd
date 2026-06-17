@@ -16,6 +16,7 @@ from .scheme import SemiDiscreteScheme
 from spd.finite_volume.fv_scheme import FV_Scheme
 from spd.trouble_detection import detect_troubles
 from spd.numerics.slicing import cut, indices, indices2, crop_fv
+from spd.numerics.polynomials import quadrature_mean
 
 
 class FallbackScheme(FV_Scheme):
@@ -117,6 +118,87 @@ class FallbackScheme(FV_Scheme):
             # We just need FV working arrays.
             self.allocate_arrays(ader=False)
             self.fb_arrays()
+            # The primary's potential is set up in its own initialize; the FV
+            # fallback operates in control-volume layout and needs its own
+            # FV-layout gradient (and equilibrium, when well-balanced).
+            if self.potential:
+                self.init_potential()
+            if self.WB:
+                self.init_equilibrium_state()
+
+    def init_potential(self) -> None:
+        """
+        Build the FV-layout potential gradient ``dm.grad_phi``.
+
+        In standalone mode this is computed directly on the FV mesh.  As a
+        fallback for a high-order primary, the FV operator runs in
+        control-volume layout, so the primary's solution-point gradient is
+        projected to the FV layout (an FV primary already stores it there).
+        """
+        if self.primary is None:
+            super().init_potential()
+            return
+        pdm = self.primary.dm
+        if getattr(pdm, "grad_phi_sp", None) is not None:
+            # High-order (SD) primary: project the SP gradient to FV layout.
+            grad_phi_cv = self.primary.compute_cv_from_sp(pdm.grad_phi_sp)
+            self.dm.grad_phi = self.primary.transpose_to_fv(grad_phi_cv)
+        else:
+            # FV primary already stores the FV-layout gradient.
+            self.dm.grad_phi = pdm.grad_phi
+
+    def init_equilibrium_state(self) -> None:
+        """
+        Build the FV-layout equilibrium state for the well-balanced fallback.
+
+        Standalone mode delegates to the FV-native implementation.  As a
+        fallback for a high-order primary, the MUSCL operator runs in
+        control-volume layout while the primary holds the equilibrium in its
+        own (SD) layout.  Here the equilibrium primitives are projected onto
+        the FV mesh (``dm.M_eq``, ghosted) and the single-valued face
+        equilibrium (``M_eq_fp_{dim}`` / ``F_eq_fp_{dim}``) is rebuilt with the
+        same MUSCL reconstruction used for the solution, so the perturbation
+        flux vanishes exactly at equilibrium.  The perturbation shift of the
+        evolved solution is owned by the primary scheme and is not repeated.
+        """
+        if self.primary is None:
+            super().init_equilibrium_state()
+            return
+        primary = self.primary
+        nvar = self.nvar
+        ngh_c = self.Nghc
+        n = primary.n["x"]  # subcells per element (same for all dims)
+        # Sample the equilibrium primitives on the primary (SD) mesh, ghosted.
+        W_gh = primary.array_sp(ngh=primary.Nghe)
+        for var in range(nvar):
+            W_gh[var] = quadrature_mean(
+                primary.mesh_cv, self.eq_fct, self.ndim, self.p, var
+            )
+        # Project to the FV cell layout and trim the element ghosts
+        # (Nghe * n cell layers) down to the Nghc cell ghosts of the FV operator.
+        M_eq_fv = primary.transpose_to_fv(W_gh)
+        crop = primary.Nghe * n - ngh_c
+        if crop > 0:
+            M_eq_fv = M_eq_fv[crop_fv(crop, -crop, 0, self.ndim, crop)]
+        M_eq = FV_Scheme.array(self, nvar, ngh=ngh_c)
+        M_eq[...] = M_eq_fv
+        self.dm.M_eq = M_eq
+        # Populate the FV cell/face spacings (h_cv, h_fp) from the primary mesh
+        # so the MUSCL reconstruction operators below are available at init.
+        self.working_arrays()
+        # Single-valued equilibrium faces, reconstructed exactly like the
+        # solution so the perturbation MUSCL flux vanishes at equilibrium.
+        for dim in self.dims:
+            idim = self.dims[dim]
+            vels = np.roll(self.vels, -idim)
+            S = self.compute_slopes(M_eq, idim)
+            ML = self.interpolate_L(M_eq, S, idim)
+            MR = self.interpolate_R(M_eq, S, idim)
+            M_eq_fp = 0.5 * (ML + MR)
+            self.dm.__setattr__(f"M_eq_fp_{dim}", M_eq_fp)
+            F = M_eq_fp.copy()
+            self.compute_physical_fluxes(F, M_eq_fp, vels)
+            self.dm.__setattr__(f"F_eq_fp_{dim}", F)
 
     def fb_arrays(self):
         """Allocate arrays used in trouble detection and flux blending."""
@@ -166,6 +248,13 @@ class FallbackScheme(FV_Scheme):
         #Pointer to the working array
         self.W_cv = dm.W_cv
         self.U_cv = dm.U_cv
+
+        # The primary re-creates its equilibrium conservatives on every
+        # SD<->FV layout switch, so mirror the current (FV-layout) array onto
+        # the fallback data manager for the trouble-detection routine, which
+        # reads ``self.dm.U_eq_cv`` directly.
+        if self.WB and self.primary is not None:
+            self.dm.U_eq_cv = dm.U_eq_cv
 
     # ----------------------------------------------------------------
     # Trouble detection
@@ -253,6 +342,24 @@ class FallbackScheme(FV_Scheme):
         if self.primary is not None:
             return self.primary.array_sp(**kwargs)
         return super().array_sp(**kwargs)
+
+    def compute_primitives_cv(self, U):
+        # The well-balanced equilibrium conservatives live on the primary's
+        # data manager (and follow its SD<->FV layout toggling), so delegate
+        # the perturbation->primitive conversion to the primary.
+        if self.primary is not None:
+            return self.primary.compute_primitives_cv(U)
+        return super().compute_primitives_cv(U)
+
+    def convert_solution(self, W=False):
+        # With a primary, the solution state (and its well-balanced
+        # perturbation/full bookkeeping) is owned by the primary scheme, so
+        # delegate.  The inherited FV conversion assumes ``U_cv`` is the
+        # perturbation, which is not the case after the SDFB update restores
+        # the full state, and would otherwise add the equilibrium twice.
+        if self.primary is not None:
+            return self.primary.convert_solution(W=W)
+        return super().convert_solution(W=W)
 
     def get_solution(self, ader=False):
         if self.primary is not None:

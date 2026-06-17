@@ -14,8 +14,6 @@ from .spectral_difference.sd_scheme import SD_Scheme
 from .finite_volume.fv_scheme import FV_Scheme
 from .schemes.fallback import FallbackScheme
 from .schemes.scheme import SemiDiscreteScheme
-from .numerics.polynomials import quadrature_mean
-from .numerics.slicing import cut, indices, indices2, crop_fv
 
 
 class SPD_Simulator(Simulator):
@@ -57,7 +55,7 @@ class SPD_Simulator(Simulator):
     def __init__(
         self,
         scheme: str = "SDFB",
-        fallback: str = "MUSCL-Hancock",
+        fallback: str = None,
         FB: bool = None,
         tolerance: float = 1e-5,
         SED: bool = True,
@@ -72,6 +70,7 @@ class SPD_Simulator(Simulator):
         predictor: bool = False,
         riemann_solver_sd: str = "llf",
         riemann_solver_fv: str = "llf",
+        slope_limiter: str = "minmod",
         ho_scheme_cls=None,
         *args,
         **kwargs,
@@ -102,6 +101,13 @@ class SPD_Simulator(Simulator):
         Simulator.__init__(self, init=False, *args, **kwargs)
         self.init = init
 
+        # Default fallback reconstruction depends on the time integrator.
+        # MUSCL-Hancock adds a half-step (dt-dependent) time prediction that
+        # suits the ADER update but is not a pure spatial RHS, so under a
+        # Runge-Kutta (method-of-lines) integrator we default to plain MUSCL.
+        if fallback is None:
+            fallback = "MUSCL-Hancock" if self.ader else "MUSCL"
+
         # The simulator's main scheme is the SD scheme;
         # the fallback is used during ader_update / fv_update.
 
@@ -125,6 +131,7 @@ class SPD_Simulator(Simulator):
                 self,
                 primary=self.ho_scheme,
                 riemann_solver=riemann_solver_fv,
+                slope_limiter=slope_limiter,
                 scheme=fallback,
                 **self._fb_params,
             )
@@ -183,15 +190,24 @@ class SPD_Simulator(Simulator):
 
     def perform_update(self) -> bool:
         self.n_step += 1
-        if self.WB:
+        # The SD perturbation shift only applies when the high-order scheme
+        # owns an element-based solution (U_sp / U_eq_sp).  The FV scheme keeps
+        # U_cv as the perturbation directly and handles the equilibrium inside
+        # its own reconstruction, so it must skip this shift.
+        wb_sd = self.WB and getattr(self.dm, "U_eq_sp", None) is not None
+        if wb_sd:
             # U -> U'
             self.dm.U_sp -= self.dm.U_eq_sp
         self.integrator.update(self.scheme)
-        if self.WB:
+        if wb_sd:
             # U' -> U
             self.dm.U_sp[...] += self.dm.U_eq_sp
             self.dm.U_cv[...] += self.dm.U_eq_cv
-        self.compute_primitives(self.dm.U_cv, W=self.dm.W_cv)
+        U_full = self.dm.U_cv
+        if self.WB and not wb_sd:
+            # FV well-balanced: U_cv stores the perturbation; report full state.
+            U_full = self.dm.U_cv + self.dm.U_eq_cv
+        self.compute_primitives(U_full, W=self.dm.W_cv)
         self.time += self.dt
         return True
 
@@ -207,66 +223,9 @@ class SPD_Simulator(Simulator):
         self.ho_scheme.dm.switch_to(CupyLocation.host)
         self.lo_scheme.dm.switch_to(CupyLocation.host)
 
-    # ------------------------------------------------------------------
-    # Potential and equilibrium
-    # ------------------------------------------------------------------
-
-    def init_potential(self) -> None:
-        self.ho_scheme.init_potential()
-        self.lo_scheme.init_potential()
-
-    def init_equilibrium_state(self) -> None:
-        crop = lambda start, end, idim, ngh: crop_fv(
-            start, end, idim, self.ndim, ngh
-        )
-        p = self.p
-        n = p + 1
-        nvar = self.nvar
-        ngh = self.Nghe
-        W_gh = self.sd_scheme.array_sp(ngh=ngh)
-        for var in range(nvar):
-            W_gh[var] = quadrature_mean(
-                self.sd_scheme.mesh_cv, self.eq_fct, self.ndim, self.p, var
-            )
-
-        W_sp = self.sd_scheme.compute_sp_from_cv(W_gh)
-        U_sp = self.compute_conservatives(W_sp)
-        self.dm.U_eq_sp = self.crop(U_sp)
-        self.dm.U_eq_cv = self.sd_scheme.compute_cv_from_sp(self.dm.U_eq_sp)
-        for dim in self.dims:
-            idim = self.dims[dim]
-            vels = np.roll(self.vels, -idim)
-            U = self.sd_scheme.compute_fp_from_sp(U_sp, dim)
-            self.dm.__setattr__(f"M_eq_fp_{dim}", self.crop(U))
-            M_fp = self.dm.__getattribute__(f"M_eq_fp_{dim}")
-            # Force equilibrium values at flux points to match between elements
-            M_fp[cut(1, None, idim + self.ndim)][indices(0, idim)] = M_fp[
-                cut(None, -1, idim + self.ndim)
-            ][indices(-1, idim)]
-            F = U.copy()
-            W = self.compute_primitives(U)
-            self.compute_fluxes(F, W, vels, prims=True)
-            self.dm.__setattr__(f"F_eq_fp_{dim}", self.crop(F))
-
-            update_mode = getattr(self, '_update_mode', 'SD')
-            if update_mode == "FV":
-                W_faces = self.sd_scheme.integrate_faces(
-                    W, dim, ader=False
-                )[cut(None, -1, idim)]
-                W_faces = self.sd_scheme.transpose_to_fv(W_faces)
-                W_faces = W_faces[crop(p + 1, -p, idim, p + 1)]
-                self.dm.__setattr__(f"M_eq_faces_{dim}", W_faces)
-                F = W_faces.copy()
-                self.compute_fluxes(F, W_faces, vels, prims=True)
-                self.dm.__setattr__(f"F_eq_faces_{dim}", F)
-        ngh = self.Nghc
-        if update_mode == "FV":
-            if n > ngh:
-                self.dm.M_eq_fv = self.sd_scheme.transpose_to_fv(W_gh)[
-                    crop(n - ngh, -(n - ngh), 0, n - ngh)
-                ]
-            else:
-                self.dm.M_eq_fv = self.sd_scheme.transpose_to_fv(W_gh)
+    # Potential and well-balanced equilibrium are initialized by each scheme
+    # in its own ``initialize`` (SD_Scheme / FV_Scheme), so there is no
+    # simulator-level init here.
 
     @property
     def domain_size(self):

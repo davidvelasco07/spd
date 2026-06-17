@@ -74,6 +74,10 @@ class FV_Scheme(SemiDiscreteScheme):
         self.compute_dt()
         self.allocate_arrays(ader=self.ader)
         self.init_Boundaries()
+        if self.potential:
+            self.init_potential()
+        if self.WB:
+            self.init_equilibrium_state()
 
     def compute_positions(self):
         """
@@ -226,6 +230,89 @@ class FV_Scheme(SemiDiscreteScheme):
             BC = self.dm.__getattribute__(f"BC_fp_{dim}")
             BC[0][...] = M[cut( None, ngh, idim)][:,na]
             BC[1][...] = M[cut(-ngh, None, idim)][:,na]
+
+    # ----------------------------------------------------------------
+    # Potential and equilibrium
+    # ----------------------------------------------------------------
+
+    def init_potential(self) -> None:
+        """
+        Build the cell-centred gradient of the gravitational potential.
+
+        The potential ``phi`` is the last variable returned by ``init_fct``;
+        ``dm.grad_phi`` has one component per spatial direction (indexed by
+        ``idim``) over the active region, matching the layout expected by
+        :meth:`Simulator.apply_potential` and the MUSCL-Hancock source term.
+        """
+        ngh = self.Nghc
+        phi = self.array(1, ngh=ngh)
+        phi[0] = quadrature_mean(
+            self.mesh_cv, self.init_fct, self.ndim, self.p, -1
+        )
+        self.dm.grad_phi = self.array(self.ndim)
+        for dim in self.dims:
+            idim = self.dims[dim]
+            # Central difference of the cell-averaged potential (uniform grid).
+            end_plus = -(ngh - 1) if ngh > 1 else None
+            phi_plus = phi[crop_fv(ngh + 1, end_plus, idim, self.ndim, ngh)]
+            phi_minus = phi[crop_fv(ngh - 1, -(ngh + 1), idim, self.ndim, ngh)]
+            h_cell = self.len[dim] / (self.N[dim] * self.n[dim])
+            self.dm.grad_phi[idim] = (phi_plus - phi_minus)[0] / (2 * h_cell)
+
+    def init_equilibrium_state(self) -> None:
+        """
+        Build the equilibrium state used by the well-balanced FV scheme.
+
+        Stores the cell-averaged equilibrium primitives ``dm.M_eq`` (ghosted,
+        read by the MUSCL reconstruction), the equilibrium conservatives
+        ``dm.U_eq_cv`` (active region), and the single-valued equilibrium
+        primitive state / physical flux at each face (``M_eq_fp_{dim}`` /
+        ``F_eq_fp_{dim}``).  The solution ``dm.U_cv`` is then shifted to the
+        perturbation ``U' = U - U_eq`` so the potential source term and the
+        perturbation fluxes vanish exactly at equilibrium.
+        """
+        ngh = self.Nghc
+        nvar = self.nvar
+        M_eq = self.array_sp(ngh=ngh)
+        for var in range(nvar):
+            M_eq[var] = quadrature_mean(
+                self.mesh_cv, self.eq_fct, self.ndim, self.p, var
+            )
+        self.dm.M_eq = M_eq
+        self.dm.U_eq_cv = self.compute_conservatives(self.active_region(M_eq))
+        for dim in self.dims:
+            idim = self.dims[dim]
+            vels = np.roll(self.vels, -idim)
+            S = self.compute_slopes(M_eq, idim)
+            ML = self.interpolate_L(M_eq, S, idim)
+            MR = self.interpolate_R(M_eq, S, idim)
+            # Single-valued (continuous) equilibrium state at the faces.
+            M_eq_fp = 0.5 * (ML + MR)
+            self.dm.__setattr__(f"M_eq_fp_{dim}", M_eq_fp)
+            F = M_eq_fp.copy()
+            self.compute_physical_fluxes(F, M_eq_fp, vels)
+            self.dm.__setattr__(f"F_eq_fp_{dim}", F)
+        # Evolve the perturbation; W_cv keeps the full primitive state for I/O.
+        self.dm.U_cv -= self.dm.U_eq_cv
+
+    def compute_physical_fluxes(self, F, M, vels, prims=True) -> None:
+        """Evaluate the analytic physical flux ``F`` of state ``M``.
+
+        ``FV_Scheme.compute_fluxes`` is the MUSCL flux pipeline (signature
+        ``(F, dt)``), which shadows the simulator-level physical-flux method.
+        The well-balanced equilibrium construction needs the raw physical
+        flux, so it is recomputed here directly from the equations.
+        """
+        W = M if prims else self.compute_primitives(M)
+        self.equations.compute_fluxes(
+            W,
+            vels,
+            self._p_,
+            self.gamma,
+            F=F,
+            thdiffusion=self.thdiffusion,
+            npassive=self.npassive,
+        )
 
     # ----------------------------------------------------------------
     # Array allocation
@@ -442,7 +529,7 @@ class FV_Scheme(SemiDiscreteScheme):
             npassive=self.npassive,
         )
         if self.WB:
-            F -= self.dm.__getattribute__(f"F_eq_{dim}")
+            F -= self.dm.__getattribute__(f"F_eq_fp_{dim}")
 
     # ----------------------------------------------------------------
     # Flux computation and RHS
@@ -511,7 +598,12 @@ class FV_Scheme(SemiDiscreteScheme):
 
     def compute_update(self, U, ader=False, prims=False, **kwargs):
         """Evaluate the spatial RHS for a given state U."""
-        self.compute_primitives(U, W=self.W_cv)
+        if self.WB:
+            # U is the perturbation U'; the reconstruction works on the
+            # primitive perturbation, then adds back the equilibrium.
+            self.W_cv[...] = self.compute_primitives_cv(U)
+        else:
+            self.compute_primitives(U, W=self.W_cv)
         self.compute_fluxes(self.F_fp, self.dt)
         return self.compute_dudt(U, ader=ader)
 
@@ -538,13 +630,23 @@ class FV_Scheme(SemiDiscreteScheme):
 
     def convert_solution(self, W=False):
         if W:
-            self.U_cv[...] = self.compute_conservatives(self.W_cv)
+            U = self.compute_conservatives(self.W_cv)
+            if self.WB:
+                # W_cv is the full primitive state; store the perturbation.
+                U -= self.dm.U_eq_cv
+            self.U_cv[...] = U
         else:
-            self.W_cv[...] = self.compute_primitives(self.U_cv)
+            self.W_cv[...] = self.compute_primitives(self._full_solution())
 
     def post_update(self):
         """Called after time integrator step: update primitives."""
-        self.compute_primitives(self.U_cv, W=self.W_cv)
+        self.compute_primitives(self._full_solution(), W=self.W_cv)
+
+    def _full_solution(self):
+        """Full conservative state (adds back the equilibrium when WB)."""
+        if self.WB:
+            return self.U_cv + self.dm.U_eq_cv
+        return self.U_cv
 
     def update(self):
         """Perform a single FV update (no integrator, Euler-forward style)."""

@@ -169,9 +169,15 @@ class SemiDiscreteScheme:
         the well-balanced case when WB is enabled.
         """
         if self.WB:
+            U_eq = self.dm.U_eq_cv
+            # The ADER predictor carries a time-points axis (inserted at axis 1
+            # by ``get_solution``); the time-independent equilibrium must
+            # broadcast over it.
+            if U.ndim > U_eq.ndim:
+                U_eq = U_eq[:, np.newaxis]
             return (
-                self.compute_primitives(U + self.dm.U_eq_cv)
-                - self.compute_primitives(self.dm.U_eq_cv)
+                self.compute_primitives(U + U_eq)
+                - self.compute_primitives(U_eq)
             )
         else:
             return self.compute_primitives(U)
