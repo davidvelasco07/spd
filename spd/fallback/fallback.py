@@ -218,6 +218,12 @@ class FallbackScheme(FV_Scheme):
                 f"F_fp_FB_{dim}",
                 self.array(self.nvar, dim=dim),
             )
+            # Boundary buffer for the trouble field (see Boundaries_scalar).
+            # Allocated here so dm.switch_to() moves it to the active backend.
+            self.dm.__setattr__(
+                f"BC_fp_scalar_{dim}",
+                self.array_BC(dim=dim),
+            )
 
     def allocate_arrays(self, ader=False):
         """Allocate arrays.  When a primary exists, super() will allocate the
@@ -236,6 +242,7 @@ class FallbackScheme(FV_Scheme):
         """Create dictionaries for the working arrays."""
         super().create_dicts()
         self.F_fp_FB = {dim: self.dm.__getattribute__(f"F_fp_FB_{dim}") for dim in self.dims}
+        self.BC_fp_scalar = {dim: self.dm.__getattribute__(f"BC_fp_scalar_{dim}") for dim in self.dims}
 
     def working_arrays(self) -> None:
         """ Create pointers to the working arrays of the primary scheme. """

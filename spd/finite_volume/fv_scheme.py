@@ -833,8 +833,6 @@ class FV_Scheme(SemiDiscreteScheme):
         amplify (rather than replace) the high-order flux there.
         """
         ngh = self.Nghc
-        if getattr(self, "BC_fp_scalar", None) is None:
-            self.BC_fp_scalar = {d: self.array_BC(dim=d) for d in self.dims}
         for dim in self.dims:
             idim = self.dims[dim]
             BC = self.BC[dim]
