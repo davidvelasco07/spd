@@ -152,8 +152,12 @@ class Slope_limiter:
         #Finally, limit the ratio to be positive and multiply
         #  by SlopeL to get the limited slope at the cell center
         #We use "where" instead of "maximum/minimum" as it doesn't
-        # propagte the NaNs caused when SlopeL=0
-        ratio = SlopeR/SlopeL
+        # propagate the NaNs caused when SlopeL=0.
+        #Also: replace SlopeL==0 with 1 inside the division so numpy
+        # does not emit a RuntimeWarning; the final multiply by SlopeL
+        # below is still zero at those locations, preserving behavior.
+        SlopeL_safe = np.where(SlopeL == 0, 1.0, SlopeL)
+        ratio = SlopeR/SlopeL_safe
         ratio = np.where(ratio<1,ratio,1)
         return np.where(ratio>0,ratio,0)*SlopeL
 

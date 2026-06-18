@@ -21,51 +21,49 @@ def _contract(A, modes_A, B, modes_B, modes_C, out=None):
     )
 
 
-def compute_A_from_B(B,A_to_B,dim,ndim,ader=False) -> np.ndarray:
-        # Axes labels:
-        #   u: Conservative variables
-        #   z,y,x: cells
-        #   k,j,i: B pts
-        #   n,m,l: A pts
-        y = ("","y") [ndim>1]
-        j = ("","j") [ndim>1]
-        z = ("","z") [ndim>2]
-        k = ("","k") [ndim>2]
-        t = ("","t") [ader]
-        u = f"u{t}{z}{y}x"
-        if dim=="x":
-            u += f"{k}{j}"
-            A = np.einsum(f"fs,{u}s->{u}f",A_to_B, B)
-        elif dim=="y" and ndim>1:
-            u += f"{k}"
-            A = np.einsum(f"fs,{u}si->{u}fi", A_to_B, B)
-        elif dim=="z" and ndim>2:
-            A = np.einsum(f"fs,{u}sji->{u}fji", A_to_B, B)
-        else:
-            raise("Wrong option for dim")
-        return A
+def compute_A_from_B(B, A_to_B, dim, ndim, ader=False) -> np.ndarray:
+    """Apply per-dim transform along `dim`.
+
+    `ader` is kept for backward compatibility; the equation uses ellipsis so
+    optional leading axes (e.g. ADER/time, block batches) are naturally handled.
+    """
+    y = ("", "y")[ndim > 1]
+    j = ("", "j")[ndim > 1]
+    z = ("", "z")[ndim > 2]
+    k = ("", "k")[ndim > 2]
+    u = f"...{z}{y}x"
+    if dim == "x":
+        u += f"{k}{j}"
+        return np.einsum(f"fs,{u}s->{u}f", A_to_B, B)
+    if dim == "y" and ndim > 1:
+        u += f"{k}"
+        return np.einsum(f"fs,{u}si->{u}fi", A_to_B, B)
+    if dim == "z" and ndim > 2:
+        return np.einsum(f"fs,{u}sji->{u}fji", A_to_B, B)
+    raise ValueError(f"Wrong option for dim: {dim!r} (ndim={ndim})")
     
-def compute_A_from_B_full(B,A_to_B,ndim) -> np.ndarray:
-       # Axes labels:
-        #   u: Conservative variables
-        #   z,y,x: cells
-        #   k,j,i: A
-        #   n,m,l: B
-        # optimize=True lets numpy/cupy contract the matrices one at a
-        # time instead of naively (orders of magnitude faster on CPU).
-        if ndim==3:
-            A = np.einsum("kn,jm,il,uzyxnml->uzyxkji",
-                         A_to_B,
-                         A_to_B,
-                         A_to_B, B, optimize=True)
-        elif ndim==2:
-            A = np.einsum("jm,il,uyxml->uyxji",
-                         A_to_B,
-                         A_to_B, B, optimize=True)
-        else:
-            A = np.einsum("il,uxl->uxi",
-                         A_to_B, B)
-        return A
+def compute_A_from_B_full(B, A_to_B, ndim) -> np.ndarray:
+    """Apply per-dim transform to all ndim spatial directions at once."""
+    # optimize=True lets numpy/cupy contract matrices one at a time and keeps
+    # CPU performance reasonable for higher-order operators.
+    if ndim == 3:
+        return np.einsum(
+            "kn,jm,il,...zyxnml->...zyxkji",
+            A_to_B,
+            A_to_B,
+            A_to_B,
+            B,
+            optimize=True,
+        )
+    if ndim == 2:
+        return np.einsum(
+            "jm,il,...yxml->...yxji",
+            A_to_B,
+            A_to_B,
+            B,
+            optimize=True,
+        )
+    return np.einsum("il,...xl->...xi", A_to_B, B)
 
 def _fv_view(A_fv, B, ndim):
         """View a contiguous FV cell-based array (u, ..., N*n) with the
