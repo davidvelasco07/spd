@@ -9,6 +9,7 @@ from .runtime.comms import CommHelper
 from .initial_conditions import sine_wave
 from . import hydro
 from .MHD import mhd
+from .amr.tree import BlockForest
 
 
 class Simulator:
@@ -70,6 +71,9 @@ class Simulator:
             ("periodic", "periodic"),
             ("periodic", "periodic"),
         ),
+        Nb: Tuple = None,
+        forest_refine=None,
+        levels=None,
         verbose=True,
         available_time=3600.0,
         init: bool = True,
@@ -182,6 +186,43 @@ class Simulator:
             end = start + self.len[dim]
             self.lim[dim] = (start, end)
         self.rank = self.comms.rank
+
+        # Block-based mesh forest. `Nb` is the per-meshblock element count per
+        # dim (athenaK convention). If None, defaults to `N` so the forest
+        # holds a single block covering the (per-rank) domain.
+        if Nb is None:
+            NB_per_dim = {dim: self.N[dim] for dim in self.dims}
+        else:
+            assert len(Nb) >= ndim, f"Nb must have at least ndim={ndim} entries"
+            NB_per_dim = {}
+            for idim in range(ndim):
+                dim = dims[idim]
+                assert self.N[dim] % Nb[idim] == 0, (
+                    f"N[{dim}]={self.N[dim]} is not divisible by Nb[{dim}]={Nb[idim]}")
+                NB_per_dim[dim] = Nb[idim]
+        self.NB = NB_per_dim
+        self.Nblocks_per_dim = {dim: self.N[dim] // self.NB[dim] for dim in self.dims}
+        for dim in "xyz":
+            self.__setattr__(f"N{dim}B", self.NB[dim] if dim in self.dims else 1)
+        self.forest = BlockForest.uniform_grid(
+            self.ndim, self.dims, self.lim, self.NB, self.Nblocks_per_dim, self.BC,
+        )
+        # Optional static refinement. Two forms -- pick one:
+        #   `levels`: declarative list of {level, xmin/xmax, ymin/ymax, zmin/zmax}
+        #             regions. Each block is refined until it meets the target
+        #             level of every region it intersects.
+        #   `forest_refine`: low-level escape hatch; a callback receiving the
+        #             forest for arbitrary refine/derefine ops.
+        # Either produces a 2:1-balanced forest before SD arrays are allocated.
+        if levels is not None and forest_refine is not None:
+            raise ValueError("Pass either 'levels' or 'forest_refine', not both")
+        if levels is not None:
+            self.forest.refine_to_levels(levels)
+            self.forest.enforce_2to1_balance()
+        elif forest_refine is not None:
+            forest_refine(self.forest)
+            self.forest.enforce_2to1_balance()
+
         self.select_integrator(time_integrator)
 
         self.noutput = 0
@@ -433,6 +474,12 @@ class Simulator:
         return M[
             (slice(None),) + (slice(ngh, -ngh),) * self.ndim + (Ellipsis,)
         ]
+
+    def crop_elements(self, M, ngh=1, ader=False) -> np.ndarray:
+        # Crop ngh ghost elements on each of the ndim cell axes. Assumes SD
+        # layout [nvar, (nader,) Nb, Nz, Ny, Nx, ...point axes].
+        pre = 3 if ader else 2
+        return M[(slice(None),) * pre + (slice(ngh, -ngh),) * self.ndim + (Ellipsis,)]
 
     def create_dicts(self):
         if self.scheme is not None:
