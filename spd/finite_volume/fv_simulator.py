@@ -81,9 +81,10 @@ class FV_Simulator(Simulator):
             raise AttributeError(name)
         scheme = object.__getattribute__(self, '__dict__').get('scheme')
         if scheme is not None:
-            # Plain lookup (instance dict + class hierarchy) without the
-            # scheme's __getattr__ fallback, which proxies back to the
-            # simulator and would recurse forever for missing attributes.
+            # Probe the scheme's real attributes only. Using hasattr/getattr
+            # here would trigger the scheme's own __getattr__, which proxies
+            # back to this simulator and causes infinite recursion for names
+            # that exist on neither object.
             try:
                 return object.__getattribute__(scheme, name)
             except AttributeError:
