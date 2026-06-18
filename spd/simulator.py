@@ -225,8 +225,10 @@ class Simulator:
             self.integrator = ADER_Integrator(m=self.m, ndim=self.ndim)
             self.ader = True
         elif "rk" in integrator_key:
-            if len(integrator_key.split("rk")) > 1:
-                self.m = int(integrator_key.split("rk")[1]) - 1
+            suffix = integrator_key.split("rk")[-1]
+            if suffix:
+                # Explicit order, e.g. "rk3"; otherwise keep self.m (= p).
+                self.m = int(suffix) - 1
             assert self.m >= 0, "RK order must be greater than 0"
             assert self.m <= 5, "RK implementation only supports up to 5th order"
             if self.soe == "induction":
