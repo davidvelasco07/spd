@@ -11,9 +11,16 @@ if CUPY_AVAILABLE:
     # neighborhood minimum.  Outputs both the raw left alpha (needed for
     # the boundary handling of compute_min) and min(alphaL, alphaR).
     smooth_extrema_k = cp.ElementwiseKernel(
-        "T dUm, T dU0, T dUp, T dv",
+        "T U0, T U1, T U2, T U3, T U4, "
+        "T x0, T x1, T x2, T x3, T x4, T h",
         "T aL, T alpha",
         """
+        // First/second derivative stencils computed inline from the
+        // 5-point neighborhood (fused; no dU/d2U temporaries).
+        T dUm = (U2 - U0) / (x2 - x0);
+        T dU0 = (U3 - U1) / (x3 - x1);
+        T dUp = (U4 - U2) / (x4 - x2);
+        T dv = 0.5 * h * ((dUp - dUm) / (x3 - x1));
         if (dv == 0) {
             aL = 1;
             alpha = 1;
@@ -29,6 +36,76 @@ if CUPY_AVAILABLE:
         """,
         "sd_smooth_extrema_k",
     )
+
+    # Fused NAD check: tolerance-relaxed DMP bounds, bound violation test,
+    # and the smooth-extrema relaxation in a single kernel (replaces the
+    # ~8 elementwise kernels of the where/arithmetic chain).
+    nad_k = cp.ElementwiseKernel(
+        "T W, T Wmin, T Wmax, T alpha, float64 tol, bool delta_mode, bool use_sed",
+        "T out",
+        """
+        T lo, hi;
+        if (delta_mode) {
+            T eps = tol * (Wmax - Wmin);
+            lo = Wmin - eps;
+            hi = Wmax + eps;
+        } else {
+            lo = Wmin - fabs(Wmin) * tol;
+            hi = Wmax + fabs(Wmax) * tol;
+        }
+        out = (W < lo || W > hi) ? (T)1 : (T)0;
+        if (use_sed && alpha >= 1) out = 0;
+        """,
+        "sd_nad_k",
+    )
+
+    # Fused PAD check: flag non-physical density/pressure on top of the
+    # existing trouble markers (in place).
+    pad_k = cp.ElementwiseKernel(
+        "T tr, T rho, T p, float64 min_rho, float64 max_rho, float64 min_P",
+        "T out",
+        """
+        out = (rho < min_rho || rho > max_rho || p < min_P) ? (T)1 : tr;
+        """,
+        "sd_pad_k",
+    )
+
+    # Neighbor-class offsets for the filter-based apply_blending path,
+    # replicating the slicing loops of the CPU implementation *exactly*.
+    # Note: the CPU 3D loops for the 0.5/0.375 classes are asymmetric
+    # (they cover only 6 of 12 edge-diagonals and 4 of 8 corners); those
+    # offsets were extracted from the CPU code's impulse response.
+    _blending_offsets = {
+        1: [],
+        2: [(0.5, [(-1, -1), (-1, 1), (1, -1), (1, 1)])],
+        3: [
+            (0.5, [(-1, -1, 0), (-1, 0, -1), (-1, 0, 1),
+                   (0, -1, -1), (0, 1, -1), (1, -1, 0)]),
+            (0.375, [(-1, -1, -1), (-1, -1, 1), (-1, 1, -1), (-1, 1, 1)]),
+        ],
+    }
+
+    _blending_fps_cache = {}
+
+    def _blending_footprints(ndim):
+        if ndim not in _blending_fps_cache:
+            center = np.ones(ndim, dtype=int)
+            fps = []
+            face_offsets = [
+                tuple(s * e for e in row)
+                for row in np.eye(ndim, dtype=int)
+                for s in (-1, 1)
+            ]
+            classes = [(0.75, face_offsets)] + _blending_offsets[ndim]
+            for w, offsets in classes:
+                fp = np.zeros((3,) * ndim, dtype=bool)
+                for o in offsets:
+                    # maximum_filter footprints are mirrored: reading
+                    # offset o corresponds to footprint index center - o.
+                    fp[tuple(center - np.array(o))] = True
+                fps.append((w, cp.asarray(fp)))
+            _blending_fps_cache[ndim] = fps
+        return _blending_fps_cache[ndim]
 
 
 def detect_troubles_induction(
@@ -76,6 +153,49 @@ def detect_troubles_induction(
             scheme.dm.theta[0][crop(ngh, -(ngh - 1), idim)],
         )
 
+def nad_check(W_new, W_min, W_max, alpha, tolerance, delta_mode):
+    """Numerical-admissibility check (dispatcher).
+
+    Flags cells whose new solution leaves the tolerance-relaxed DMP bounds
+    [W_min, W_max], except at smooth extrema (alpha >= 1, when given).
+    Single fused kernel on the GPU; numpy chain on the CPU.
+    """
+    if is_gpu_array(W_new):
+        return nad_k(
+            W_new, W_min, W_max,
+            alpha if alpha is not None else W_min,
+            tolerance,
+            delta_mode,
+            alpha is not None,
+        )
+    if delta_mode:
+        epsilon = tolerance * (W_max - W_min)
+        W_min = W_min - epsilon
+        W_max = W_max + epsilon
+    else:
+        W_min = W_min - np.abs(W_min) * tolerance
+        W_max = W_max + np.abs(W_max) * tolerance
+    trouble = np.where(W_new >= W_min, 0, 1)
+    trouble = np.where(W_new <= W_max, trouble, 1)
+    if alpha is not None:
+        trouble *= np.where(alpha < 1, 1, 0)
+    return trouble
+
+
+def pad_check(troubles, rho, P, min_rho, max_rho, min_P):
+    """Physical-admissibility check (dispatcher).
+
+    Flags cells with non-physical density or pressure on top of the
+    existing trouble markers and returns the updated array.
+    """
+    if is_gpu_array(troubles):
+        pad_k(troubles, rho, P, min_rho, max_rho, min_P, troubles)
+        return troubles
+    troubles = np.where(rho >= min_rho, troubles, 1)
+    troubles = np.where(rho <= max_rho, troubles, 1)
+    return np.where(P >= min_P, troubles, 1)
+
+
 def detect_troubles(self: Simulator):
     if self.godunov:
         return
@@ -103,21 +223,13 @@ def detect_troubles(self: Simulator):
 
     W_max = self.crop(W_max,ngh=ngh)
     W_min = self.crop(W_min,ngh=ngh)
-    
-    if self.p > 0:
-        if self.NAD == "delta":
-            epsilon = self.tolerance*(W_max-W_min)
-            W_min -= epsilon 
-            W_max += epsilon
-        else:
-            W_min -= np.abs(W_min) * self.tolerance
-            W_max += np.abs(W_max) * self.tolerance
 
     W_new_lv = W_new[lv]
-    possible_trouble = np.where(W_new_lv >= W_min, 0, 1)
-    possible_trouble = np.where(W_new_lv <= W_max, possible_trouble, 1)
-       
-    # Now check for smooth extrema and relax the criteria for such cases
+
+    # Smooth extrema detection: alpha < 1 marks a genuine extremum.
+    # Computed before the bound check so the fused GPU kernel can apply
+    # bounds and SED relaxation in one pass.
+    alpha = None
     if self.p > 1 and self.SED:
         self.fill_active_region(W_new)
         self.Boundaries(self.dm.M)
@@ -128,7 +240,10 @@ def detect_troubles(self: Simulator):
             alpha_new = compute_smooth_extrema(self, M_lv, dim)[crop(None,None,idim)]
             alpha = np.where(alpha_new < alpha, alpha_new, alpha)
 
-        possible_trouble *= np.where(alpha<1, 1, 0)
+    tolerance = self.tolerance if self.p > 0 else 0.0
+    possible_trouble = nad_check(
+        W_new_lv, W_min, W_max, alpha, tolerance, self.NAD == "delta"
+    )
 
     self.dm.troubles[...] = np.amax(possible_trouble,axis=0)
     
@@ -138,16 +253,11 @@ def detect_troubles(self: Simulator):
     if self.PAD:
         if self.WB:
             W_new += self.compute_primitives(self.dm.U_eq_cv)
-        # For the density
-        self.dm.troubles = np.where(
-            W_new[self._d_, ...] >= self.min_rho, self.dm.troubles, 1
+        self.dm.troubles = pad_check(
+            self.dm.troubles,
+            W_new[self._d_, ...], W_new[self._p_, ...],
+            self.min_rho, self.max_rho, self.min_P,
         )
-        self.dm.troubles = np.where(
-            W_new[self._d_, ...] <= self.max_rho, self.dm.troubles, 1
-        )
-        # For the pressure
-        self.dm.troubles = np.where(
-            W_new[self._p_, ...] >= self.min_P, self.dm.troubles, 1)
 
     #self.n_troubles += self.dm.troubles.sum()
     self.dm.M[...] = 0
@@ -237,21 +347,24 @@ def compute_smooth_extrema(self, U, dim):
     eps = 0
     idim = self.dims[dim]
     centers = self.centers[dim][self.shape(idim)]
+    if is_gpu_array(U):
+        # Fully fused path: derivatives and the alpha_L/alpha_R chain are
+        # computed inside one kernel from the shifted 5-point views.
+        sl = lambda a, b: cut(a, b, idim)
+        aL, alpha = smooth_extrema_k(
+            U[sl(None, -4)], U[sl(1, -3)], U[sl(2, -2)],
+            U[sl(3, -1)], U[sl(4, None)],
+            centers[sl(None, -4)], centers[sl(1, -3)], centers[sl(2, -2)],
+            centers[sl(3, -1)], centers[sl(4, None)],
+            self.h_fp[dim][sl(2, -2)],
+        )
+        compute_min(alpha, aL, idim)
+        return aL
     # First derivative dUdx(i) = [U(i+1)-U(i-1)]/[x_cv(i+1)-x_cv(i-1)]
     dU  = first_order_derivative( U, centers, idim)
     # Second derivative d2Udx2(i) = [dU(i+1)-dU(i-1)]/[x_cv(i+1)-x_cv(i-1)]
     d2U = first_order_derivative(dU, centers[cut(1,-1,idim)], idim)
     dv = 0.5 * self.h_fp[dim][cut(2,-2,idim)] * d2U
-    if CUPY_AVAILABLE and is_gpu_array(dv):
-        # Fused path: one kernel for the whole alpha_L/alpha_R chain.
-        alphaL, alphaR = smooth_extrema_k(
-            dU[cut(None, -2, idim)],
-            dU[cut(1, -1, idim)],
-            dU[cut(2, None, idim)],
-            dv,
-        )
-        compute_min(alphaR, alphaL, idim)
-        return alphaL
     # vL = dU(i-1)-dU(i)
     vL = dU[cut(None,-2,idim)] - dU[cut(1,-1,idim)]
     # alphaL = min(1,max(vL,0)/(-dv)),1,min(1,min(vL,0)/(-dv)) for dv<0,dv=0,dv>0
@@ -271,6 +384,8 @@ def compute_smooth_extrema(self, U, dim):
     return alphaL
 
 def apply_blending(self,trouble,theta):
+    if is_gpu_array(theta):
+        return apply_blending_gpu(self, trouble, theta)
     a = slice(None,-1)
     b = slice( 1,None)
     cuts = [(a,a),(a,b),(b,a),(b,b)]
@@ -301,5 +416,26 @@ def apply_blending(self,trouble,theta):
     for idim in self.idims:
         theta[cut(None,-1,idim)] = np.maximum(.25*(theta[cut( 1,None,idim)]>0),theta[cut(None,-1,idim)])
         theta[cut( 1,None,idim)] = np.maximum(.25*(theta[cut(None,-1,idim)]>0),theta[cut( 1,None,idim)])
+
+
+def apply_blending_gpu(self, trouble, theta):
+    """Filter-based equivalent of apply_blending for device arrays.
+
+    The CPU version spreads trouble to neighbors through ~15 sliced
+    ``np.maximum`` updates.  All of those read only ``trouble`` (the
+    neighbor classes) or amount to a binary dilation of the positive
+    region (the sequential 0.25 "last layer" adds exactly one box-shaped
+    ring, since every positive theta is already >= 0.375 > 0.25), so the
+    whole operation reduces to a few maximum_filter calls.  Out-of-range
+    neighbors never contribute in the sliced version, hence
+    ``mode='constant', cval=0``.
+    """
+    from cupyx.scipy import ndimage as cundi
+
+    for w, fp in _blending_footprints(self.ndim):
+        f = cundi.maximum_filter(trouble, footprint=fp, mode="constant", cval=0.0)
+        cp.maximum(theta, w * f, out=theta)
+    ring = cundi.maximum_filter(theta, size=3, mode="constant", cval=0.0)
+    cp.maximum(theta, 0.25 * (ring > 0), out=theta)
      
         

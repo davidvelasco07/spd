@@ -17,6 +17,30 @@ from spd.finite_volume.fv_scheme import FV_Scheme
 from .trouble_detection import detect_troubles
 from spd.numerics.slicing import cut, indices, indices2, crop_fv
 from spd.numerics.polynomials import quadrature_mean
+from spd.runtime.gpu import CUPY_AVAILABLE, is_gpu_array
+
+if CUPY_AVAILABLE:
+    import cupy as cp
+
+    # Fused convex flux blend: F = theta*FB + (1-theta)*F in one kernel
+    # (theta broadcasts over the variable axis).
+    blend_k = cp.ElementwiseKernel(
+        "T f, T fb, T theta",
+        "T out",
+        "out = f + theta * (fb - f);",
+        "fb_blend_k",
+    )
+
+
+def blend_fluxes(F, F_FB, theta):
+    """Convex blend theta*F_FB + (1-theta)*F (dispatcher).
+
+    Out of place, since F may be a view of the primary scheme's fluxes.
+    Scalar theta (godunov mode) takes the generic path.
+    """
+    if is_gpu_array(theta):
+        return blend_k(F, F_FB, theta)
+    return theta * F_FB + (1 - theta) * F
 
 
 class FallbackScheme(FV_Scheme):
@@ -326,9 +350,8 @@ class FallbackScheme(FV_Scheme):
                 theta = 1
             else:
                 theta = self.dm.__getattribute__(f"affected_faces_{dim}")
-            self.F_fp[dim] = (
-                theta * self.F_fp_FB[dim]
-                + (1 - theta) * self.F_fp[dim]
+            self.F_fp[dim] = blend_fluxes(
+                self.F_fp[dim], self.F_fp_FB[dim], theta
             )
 
     def compute_corrected_fluxes(self, dt):

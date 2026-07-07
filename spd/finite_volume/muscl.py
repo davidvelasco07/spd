@@ -3,6 +3,109 @@ from spd.simulator import Simulator
 
 from spd.numerics.slicing import cut
 from spd.numerics.slicing import crop_fv
+from spd.runtime.gpu import CUPY_AVAILABLE, is_gpu_array
+
+if CUPY_AVAILABLE:
+    import cupy as cp
+
+    # Slope limiters as device functions.  Each entry provides
+    # ``limited_slope(dL, dR, hL, hR, hM)`` used by the fused face
+    # reconstruction kernel below; adding a limiter only requires a new
+    # device-function string here (the CPU path keeps the numpy methods).
+    _LIMITER_DEVICE = {
+        "minmod": """
+        template<typename T>
+        __device__ T limited_slope(T dL, T dR, T hL, T hR, T hM) {
+            // Mirrors the numpy version: r=dR/dL clipped to [0,1]; the
+            // NaN from dL==0 compares false and falls through to 0*dL=0.
+            T r = dR / dL;
+            r = r < 1 ? r : (T)1;
+            r = r > 0 ? r : (T)0;
+            return r * dL;
+        }
+        """,
+        "moncen": """
+        template<typename T>
+        __device__ T limited_slope(T dL, T dR, T hL, T hR, T hM) {
+            T dC = (hL * dL + hR * dR) / (hL + hR);
+            T s = min(fabs(2 * dL * hL / hM), fabs(2 * dR * hR / hM));
+            s = min(s, fabs(dC));
+            s = dC >= 0 ? s : -s;
+            return (dL * dR >= 0) ? s : (T)0;
+        }
+        """,
+    }
+
+    _muscl_face_kernels = {}
+
+    def _muscl_face_kernel(limiter: str):
+        """Fused MUSCL face reconstruction (slopes + L/R interpolation).
+
+        Elementwise over faces: face k sits between cells k+1 and k+2 of the
+        ghosted array; the kernel receives the four cells of the stencil as
+        shifted views and computes both limited cell slopes inline.  Replaces
+        the slope/interpolation kernel chain and all its temporaries with a
+        single launch per dimension.
+        """
+        if limiter not in _muscl_face_kernels:
+            if limiter not in _LIMITER_DEVICE:
+                raise NotImplementedError(
+                    f"No device function for slope limiter '{limiter}'"
+                )
+            _muscl_face_kernels[limiter] = cp.ElementwiseKernel(
+                "T M0, T M1, T M2, T M3, "
+                "T hcv0, T hcv1, T hcv2, T hfp1, T hfp2",
+                "T ML, T MR",
+                """
+                T dM0 = (M1 - M0) / hcv0;
+                T dM1 = (M2 - M1) / hcv1;
+                T dM2 = (M3 - M2) / hcv2;
+                ML = M1 + 0.5 * hfp1 * limited_slope(dM0, dM1, hcv0, hcv1, hfp1);
+                MR = M2 - 0.5 * hfp2 * limited_slope(dM1, dM2, hcv1, hcv2, hfp2);
+                """,
+                f"fv_muscl_faces_{limiter}",
+                preamble=_LIMITER_DEVICE[limiter],
+            )
+        return _muscl_face_kernels[limiter]
+
+
+def reconstruct_faces(self, dim: str, idim: int) -> None:
+    """Fill ML_fp/MR_fp for *dim* with the MUSCL reconstruction (dispatcher).
+
+    On the GPU (for limiters with a device function) this is a single fused
+    kernel; otherwise slopes and interpolations run as separate numpy ops.
+    is_gpu_array is False whenever CuPy is unavailable, so _LIMITER_DEVICE
+    (only defined under CUPY_AVAILABLE) is never referenced in that case.
+    """
+    if is_gpu_array(self.dm.M) and self.slope_limiter.limiter in _LIMITER_DEVICE:
+        return reconstruct_faces_gpu(self, dim, idim)
+    S = self.compute_slopes(self.dm.M, idim)
+    self.MR_fp[dim][...] = self.interpolate_R(self.dm.M, S, idim)
+    self.ML_fp[dim][...] = self.interpolate_L(self.dm.M, S, idim)
+
+
+def reconstruct_faces_gpu(self, dim: str, idim: int) -> None:
+    """Fill ML_fp/MR_fp for *dim* with the fused GPU reconstruction."""
+    ngh = self.Nghc
+    M = self.dm.M
+    crop = lambda start, end: crop_fv(start, end, idim, self.ndim, ngh)
+    h_cv = self.h_cv[dim]
+    h_fp = self.h_fp[dim]
+    kernel = _muscl_face_kernel(self.slope_limiter.limiter)
+    kernel(
+        M[crop(None, -3)],
+        M[crop(1, -2)],
+        M[crop(2, -1)],
+        M[crop(3, None)],
+        h_cv[cut(None, -2, idim)],
+        h_cv[cut(1, -1, idim)],
+        h_cv[cut(2, None, idim)],
+        h_fp[cut(1, -2, idim)],
+        h_fp[cut(2, -1, idim)],
+        self.ML_fp[dim],
+        self.MR_fp[dim],
+    )
+
 
 class Slope_limiter:
     def __init__(self,limiter):
@@ -118,11 +221,7 @@ def MUSCL_fluxes(self: Simulator,
     """
     for dim in self.dims:
         idim=self.dims[dim]
-        
-        S = self.compute_slopes(self.dm.M,idim)    
-        
-        self.MR_fp[dim][...] = self.interpolate_R(self.dm.M,S,idim)
-        self.ML_fp[dim][...] = self.interpolate_L(self.dm.M,S,idim)
+        reconstruct_faces(self, dim, idim)
         self.solve_riemann_problem(dim,F[dim],prims)
     
 def compute_prediction(W: np.ndarray,
