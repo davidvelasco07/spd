@@ -60,7 +60,7 @@ class FallbackScheme(FV_Scheme):
     godunov : bool
         If True, use pure Godunov (no blending, theta=1 everywhere).
     limiting_variables : list
-        Variable indices used for NAD check.
+        Variable indices used for NAD check (default: density and pressure).
     """
 
     def __init__(
@@ -103,8 +103,11 @@ class FallbackScheme(FV_Scheme):
         self.max_rho = max_rho
         self.min_P = min_P
         self.godunov = godunov
+        # Default: check density and pressure.
         self.limiting_variables = (
-            limiting_variables if limiting_variables is not None else [0]
+            limiting_variables
+            if limiting_variables is not None
+            else [self._d_, self._p_]
         )
         if self.primary is not None:
             self.ader = False

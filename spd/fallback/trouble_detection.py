@@ -1,6 +1,34 @@
 import numpy as np
 from spd.simulator import Simulator
 from spd.numerics.slicing import cut, crop_fv
+from spd.runtime.gpu import CUPY_AVAILABLE, is_gpu_array
+
+if CUPY_AVAILABLE:
+    import cupy as cp
+
+    # Fused smooth-extrema kernel: replaces the ~10 elementwise kernels
+    # (and their temporaries) between the derivative stencils and the
+    # neighborhood minimum.  Outputs both the raw left alpha (needed for
+    # the boundary handling of compute_min) and min(alphaL, alphaR).
+    smooth_extrema_k = cp.ElementwiseKernel(
+        "T dUm, T dU0, T dUp, T dv",
+        "T aL, T alpha",
+        """
+        if (dv == 0) {
+            aL = 1;
+            alpha = 1;
+        } else {
+            T vL = dUm - dU0;
+            T vR = dUp - dU0;
+            aL = -((dv < 0) ? (vL > 0 ? vL : (T)0) : (vL < 0 ? vL : (T)0)) / dv;
+            aL = aL < 1 ? aL : (T)1;
+            T aR = ((dv > 0) ? (vR > 0 ? vR : (T)0) : (vR < 0 ? vR : (T)0)) / dv;
+            aR = aR < 1 ? aR : (T)1;
+            alpha = aL < aR ? aL : aR;
+        }
+        """,
+        "sd_smooth_extrema_k",
+    )
 
 
 def detect_troubles_induction(
@@ -55,31 +83,23 @@ def detect_troubles(self: Simulator):
     # Reset to check troubled control volumes
     ngh=self.Nghc
     crop = lambda start,end,idim : crop_fv(start,end,idim,self.ndim,ngh)
+    lv = list(self.limiting_variables)
     self.dm.troubles[...] = 0
-    W_old = self.compute_primitives_cv(self.U_cv)
+    # W_cv was filled from U_cv by compute_corrected_fluxes just before this
+    # call, so reuse it instead of recomputing the primitives.
     # W_old -> s.dm.M
-    self.fill_active_region(W_old)
+    self.fill_active_region(self.W_cv)
     W_new = self.compute_primitives_cv(self.dm.U_new)    
     ##############################################
     # NAD Check for numerically adimissible values
     ##############################################
     # First check if DMP criteria is met, if it is we can avoid computing alpha
+    # The NAD/SED pipeline only feeds the trouble flag through the limiting
+    # variables, so restrict the (expensive) neighborhood work to those rows.
     self.Boundaries(self.dm.M)
-    W_max = self.dm.M.copy()
-    W_min = self.dm.M.copy()
-    if getattr(self, "NAD_neighbors", "1st") == "2nd":
-        # 2nd neighbors -> Moore (box) neighborhood: chain the extrema so each
-        # successive dimension operates on the already-extended array, which
-        # pulls in the diagonal ("second") neighbors as well as the faces.
-        for idim in self.idims:
-            W_max = compute_W_max(W_max, idim)
-            W_min = compute_W_min(W_min, idim)
-    else:
-        # 1st neighbors -> von Neumann (cross) neighborhood: per-dimension
-        # extrema combined, i.e. only the face-adjacent neighbors.
-        for idim in self.idims:
-            W_max = np.maximum(compute_W_max(self.dm.M,idim),W_max)
-            W_min = np.minimum(compute_W_min(self.dm.M,idim),W_min)
+    W_max, W_min = neighborhood_extrema(
+        self.dm.M[lv], self.ndim, getattr(self, "NAD_neighbors", "1st")
+    )
 
     W_max = self.crop(W_max,ngh=ngh)
     W_min = self.crop(W_min,ngh=ngh)
@@ -93,22 +113,24 @@ def detect_troubles(self: Simulator):
             W_min -= np.abs(W_min) * self.tolerance
             W_max += np.abs(W_max) * self.tolerance
 
-    possible_trouble = np.where(W_new >= W_min, 0, 1)
-    possible_trouble = np.where(W_new <= W_max, possible_trouble, 1)
+    W_new_lv = W_new[lv]
+    possible_trouble = np.where(W_new_lv >= W_min, 0, 1)
+    possible_trouble = np.where(W_new_lv <= W_max, possible_trouble, 1)
        
     # Now check for smooth extrema and relax the criteria for such cases
     if self.p > 1 and self.SED:
         self.fill_active_region(W_new)
         self.Boundaries(self.dm.M)
-        alpha = W_new*0 + 1
+        M_lv = self.dm.M[lv]
+        alpha = W_new_lv*0 + 1
         for dim in self.dims:
             idim = self.dims[dim]
-            alpha_new = compute_smooth_extrema(self, self.dm.M, dim)[crop(None,None,idim)]
+            alpha_new = compute_smooth_extrema(self, M_lv, dim)[crop(None,None,idim)]
             alpha = np.where(alpha_new < alpha, alpha_new, alpha)
 
         possible_trouble *= np.where(alpha<1, 1, 0)
 
-    self.dm.troubles[...] = np.amax(possible_trouble[self.limiting_variables],axis=0)
+    self.dm.troubles[...] = np.amax(possible_trouble,axis=0)
     
     ###########################
     # PAD Check for physically admissible values
@@ -144,6 +166,50 @@ def detect_troubles(self: Simulator):
         affected_faces[...] = 0
         affected_faces[...] = np.maximum(theta[crop(ngh-1,-ngh,idim)],theta[crop(ngh,-(ngh-1),idim)])
 
+def neighborhood_extrema(M, ndim, neighbors):
+    """Per-cell (max, min) over the neighborhood of the trailing ndim axes.
+
+    neighbors="2nd" uses the Moore (3^ndim box) neighborhood, anything else
+    the von Neumann (face/cross) neighborhood; both include the center.
+    On the GPU this is a single filter call each instead of the chained
+    per-dimension slicing kernels (which are kept as the CPU path).
+    ``mode='nearest'`` reproduces the edge handling of the chained version.
+    """
+    if is_gpu_array(M):
+        from cupyx.scipy import ndimage as cundi
+        if neighbors == "2nd":
+            size = (1,) + (3,) * ndim
+            return (
+                cundi.maximum_filter(M, size=size, mode="nearest"),
+                cundi.minimum_filter(M, size=size, mode="nearest"),
+            )
+        fp = np.zeros((1,) + (3,) * ndim, dtype=bool)
+        center = (0,) + (1,) * ndim
+        fp[center] = True
+        for ax in range(ndim):
+            for off in (0, 2):
+                idx = list(center)
+                idx[1 + ax] = off
+                fp[tuple(idx)] = True
+        return (
+            cundi.maximum_filter(M, footprint=cp.asarray(fp), mode="nearest"),
+            cundi.minimum_filter(M, footprint=cp.asarray(fp), mode="nearest"),
+        )
+    W_max = M.copy()
+    W_min = M.copy()
+    if neighbors == "2nd":
+        # Chain the extrema so each successive dimension operates on the
+        # already-extended array, pulling in the diagonal neighbors too.
+        for idim in range(ndim):
+            W_max = compute_W_max(W_max, idim)
+            W_min = compute_W_min(W_min, idim)
+    else:
+        # Per-dimension extrema combined: only the face-adjacent neighbors.
+        for idim in range(ndim):
+            W_max = np.maximum(compute_W_max(M, idim), W_max)
+            W_min = np.minimum(compute_W_min(M, idim), W_min)
+    return W_max, W_min
+
 def compute_W_ex(W, idim, f):
     W_f = W.copy()
     # W_f(i) = f(W(i-1),W(i),W(i+1))
@@ -176,6 +242,16 @@ def compute_smooth_extrema(self, U, dim):
     # Second derivative d2Udx2(i) = [dU(i+1)-dU(i-1)]/[x_cv(i+1)-x_cv(i-1)]
     d2U = first_order_derivative(dU, centers[cut(1,-1,idim)], idim)
     dv = 0.5 * self.h_fp[dim][cut(2,-2,idim)] * d2U
+    if CUPY_AVAILABLE and is_gpu_array(dv):
+        # Fused path: one kernel for the whole alpha_L/alpha_R chain.
+        alphaL, alphaR = smooth_extrema_k(
+            dU[cut(None, -2, idim)],
+            dU[cut(1, -1, idim)],
+            dU[cut(2, None, idim)],
+            dv,
+        )
+        compute_min(alphaR, alphaL, idim)
+        return alphaL
     # vL = dU(i-1)-dU(i)
     vL = dU[cut(None,-2,idim)] - dU[cut(1,-1,idim)]
     # alphaL = min(1,max(vL,0)/(-dv)),1,min(1,min(vL,0)/(-dv)) for dv<0,dv=0,dv>0

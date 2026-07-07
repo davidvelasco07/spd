@@ -437,10 +437,12 @@ class Simulator:
         self.execution_time = -timer()
 
     def end_sim(self):
-        self.switch_to_host()
         self.execution_time += timer()
-        self.create_dicts()
+        # Convert while arrays are still on the device: the host-side
+        # conversion (numpy einsum) is orders of magnitude slower.
         self.convert_solution()
+        self.switch_to_host()
+        self.create_dicts()
         if self.rank == 0:
             print(
                 f"t={self.time}, steps taken {self.n_step}, "

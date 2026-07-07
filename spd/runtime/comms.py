@@ -17,6 +17,7 @@ class CommHelper():
         else:
             self.size = 1
             self.rank = 0
+        self.select_gpu()
         
         self.nx = int(self.size**(1./ndim))
         while (self.size%self.nx != 0):
@@ -45,6 +46,21 @@ class CommHelper():
         self.Comms_fv = self.Comms(cuts)
         self.Comms_sd = self.Comms(indices2)
     
+    def select_gpu(self):
+        """Bind each MPI rank to its own GPU (round-robin over visible devices).
+
+        Without this, all ranks allocate on device 0.
+        """
+        if self.size <= 1:
+            return
+        try:
+            import cupy as cp
+            ndev = cp.cuda.runtime.getDeviceCount()
+            if ndev > 0:
+                cp.cuda.Device(self.rank % ndev).use()
+        except Exception:
+            pass
+
     def send_recv_replace(self,buffer,neighbour,side):
         self.comm.Sendrecv_replace(buffer,neighbour,sendtag=side,source=neighbour,recvtag=1-side)
         

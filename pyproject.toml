@@ -11,5 +11,11 @@ dependencies = [
     "numpy",
 ]
 
+[project.optional-dependencies]
+gpu = [
+    "cupy-cuda12x",
+    "cutensor-cu12",
+]
+
 [tool.setuptools.packages.find]
 include = ["spd*"]

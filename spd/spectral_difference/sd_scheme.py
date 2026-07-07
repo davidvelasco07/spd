@@ -19,7 +19,11 @@ from spd.numerics.polynomials import (
 )
 
 from spd.riemann_solvers.riemann_solver_1D import Riemann_solver_1D as rs1d
-from spd.numerics.transforms import compute_A_from_B, compute_A_from_B_full
+from spd.numerics.transforms import (
+    compute_A_from_B,
+    compute_A_from_B_full,
+    compute_A_from_B_full_fv,
+)
 from spd.numerics.slicing import cut, indices, indices2
 from spd.spectral_difference import sd_boundary as bc
 from spd.numerics.polynomials import gauss_legendre_quadrature, flux_points, solution_points 
@@ -335,6 +339,11 @@ class SD_Scheme(SemiDiscreteScheme):
     def compute_cv_from_sp(self, M_sp) -> np.ndarray:
         return compute_A_from_B_full(M_sp, self.dm.sp_to_cv, self.ndim)
 
+    def compute_cv_from_sp_fv(self, M_sp) -> np.ndarray:
+        """Project sp->cv and emit the FV cell-based layout directly,
+        fusing the projection and transpose_to_fv into one einsum."""
+        return compute_A_from_B_full_fv(M_sp, self.dm.sp_to_cv, self.ndim)
+
     def compute_cp_from_sp(self, M_sp) -> np.ndarray:
         return compute_A_from_B_full(M_sp, self.dm.sp_to_fp, self.ndim)
 
@@ -591,11 +600,10 @@ class SD_Scheme(SemiDiscreteScheme):
 
     def switch_to_finite_volume(self, integrate_faces=True, ader=False, U_sp=None):
         """Convert SD element-based arrays to FV cell-based layout."""
-        # Compute control volume averages
+        # Compute control volume averages directly in Finite Volume layout
+        # (projection and layout change fused into a single einsum).
         U_sp = self.dm.U_sp if U_sp is None else U_sp
-        self.dm.U_cv[...] = self.compute_cv_from_sp(U_sp)
-        # Change to Finite Volume layout
-        self.dm.U_cv = self.transpose_to_fv(self.dm.U_cv)
+        self.dm.U_cv = self.compute_cv_from_sp_fv(U_sp)
         self.dm.W_cv = self.transpose_to_fv(self.dm.W_cv)
         if self.WB:
             self.dm.U_eq_cv = self.transpose_to_fv(self.dm.U_eq_cv)

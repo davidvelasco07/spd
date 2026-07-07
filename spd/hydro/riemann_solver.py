@@ -1,5 +1,6 @@
 import numpy as np
 from . import hydro
+from . import gpu_kernels as gk
 
 def llf(
         W_L: np.ndarray,
@@ -27,6 +28,9 @@ def llf(
         #Density index
         _d_=0 
         v_1 = vels[0]
+        # Fast path: single fused kernel for the 5-variable GPU case
+        if F is not None and W_L.shape[0] == 5 and gk.is_gpu_array(W_L):
+            return gk.llf(W_L, W_R, U_L, U_R, F, vels, gamma, min_c2)
         F_L = hydro.compute_fluxes(W_L,vels,_p_,gamma,**kwargs)
         F_R = hydro.compute_fluxes(W_R,vels,_p_,gamma,**kwargs)
 

@@ -88,8 +88,14 @@ class SD_Simulator(Simulator):
         if name.startswith('_') or name == 'scheme':
             raise AttributeError(name)
         scheme = object.__getattribute__(self, '__dict__').get('scheme')
-        if scheme is not None and hasattr(scheme, name):
-            return getattr(scheme, name)
+        if scheme is not None:
+            # Plain lookup (instance dict + class hierarchy) without the
+            # scheme's __getattr__ fallback, which proxies back to the
+            # simulator and would recurse forever for missing attributes.
+            try:
+                return object.__getattribute__(scheme, name)
+            except AttributeError:
+                pass
         raise AttributeError(
             f"'{type(self).__name__}' object has no attribute '{name}'"
         )
