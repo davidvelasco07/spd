@@ -215,8 +215,6 @@ class FV_Scheme(SemiDiscreteScheme):
         self.dm.W_gh = W_gh
         self.dm.W_cv = self.active_region(self.dm.W_gh)
         self.dm.U_cv = self.compute_conservatives(self.dm.W_cv)
-        self.W_cv = self.dm.W_cv
-        self.U_cv = self.dm.U_cv
 
     def init_Boundaries(self) -> None:
         na = np.newaxis if self.ader else Ellipsis
@@ -437,15 +435,48 @@ class FV_Scheme(SemiDiscreteScheme):
         self.working_arrays()
 
     def working_arrays(self) -> None:
+        """Refresh the mesh-coordinate dictionaries from the data manager
+        (needed after host/device switches, via create_dicts)."""
         for dim in self.dims:
             self.faces[dim] = self.dm.__getattribute__(f"{dim.upper()}_fp")
             self.centers[dim] = self.dm.__getattribute__(f"{dim.upper()}_cv")
             self.h_fp[dim] = self.dm.__getattribute__(f"d{dim}_fp")
             self.h_cv[dim] = self.dm.__getattribute__(f"d{dim}_cv")
 
-        #Pointer to the working array
-        self.W_cv = self.dm.W_cv
-        self.U_cv = self.dm.U_cv
+    # ----------------------------------------------------------------
+    # Solution-state access
+    # ----------------------------------------------------------------
+    # W_cv/U_cv always resolve through the owning data manager, so layout
+    # switches (which repoint dm.W_cv/dm.U_cv between the persistent SD- and
+    # FV-layout buffers) need no pointer-refresh bookkeeping here.
+
+    @property
+    def state_dm(self):
+        """Data manager owning the solution state."""
+        return self.dm
+
+    @property
+    def W_cv(self):
+        return self.state_dm.W_cv
+
+    @W_cv.setter
+    def W_cv(self, value):
+        # Supports augmented assignment (self.W_cv -= dU): the in-place op
+        # already modified the array; re-storing it is a no-op repoint.
+        self.state_dm.W_cv = value
+
+    @property
+    def U_cv(self):
+        return self.state_dm.U_cv
+
+    @U_cv.setter
+    def U_cv(self, value):
+        self.state_dm.U_cv = value
+
+    @property
+    def U_eq_cv(self):
+        return self.state_dm.U_eq_cv
+
     # ----------------------------------------------------------------
     # MUSCL reconstruction
     # ----------------------------------------------------------------

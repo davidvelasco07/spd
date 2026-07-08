@@ -208,15 +208,18 @@ def detect_troubles(self: Simulator):
     # W_cv was filled from U_cv by compute_corrected_fluxes just before this
     # call, so reuse it instead of recomputing the primitives.
     # W_old -> s.dm.M
-    self.fill_active_region(self.W_cv)
-    W_new = self.compute_primitives_cv(self.dm.U_new)    
+    W_new = self.compute_primitives_cv(self.dm.U_new)
     ##############################################
     # NAD Check for numerically adimissible values
     ##############################################
     # First check if DMP criteria is met, if it is we can avoid computing alpha
     # The NAD/SED pipeline only feeds the trouble flag through the limiting
     # variables, so restrict the (expensive) neighborhood work to those rows.
-    self.Boundaries(self.dm.M)
+    if not self._W_ghosts_current:
+        # Otherwise dm.M already holds the ghosted W_cv (filled by the MUSCL
+        # flux pipeline just before this call, with boundaries applied).
+        self.fill_active_region(self.W_cv)
+        self.Boundaries(self.dm.M)
     W_max, W_min = neighborhood_extrema(
         self.dm.M[lv], self.ndim, getattr(self, "NAD_neighbors", "1st")
     )
@@ -252,7 +255,9 @@ def detect_troubles(self: Simulator):
     ###########################
     if self.PAD:
         if self.WB:
-            W_new += self.compute_primitives(self.dm.U_eq_cv)
+            # U_eq_cv resolves through the state-owning dm (the primary's,
+            # for a fallback scheme), already in FV layout at this point.
+            W_new += self.compute_primitives(self.U_eq_cv)
         self.dm.troubles = pad_check(
             self.dm.troubles,
             W_new[self._d_, ...], W_new[self._p_, ...],

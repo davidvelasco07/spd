@@ -23,6 +23,7 @@ from spd.numerics.transforms import (
     compute_A_from_B,
     compute_A_from_B_full,
     compute_A_from_B_full_fv,
+    compute_A_from_B_full_from_fv,
 )
 from spd.numerics.slicing import cut, indices, indices2
 from spd.spectral_difference import sd_boundary as bc
@@ -83,6 +84,14 @@ class SD_Scheme(SemiDiscreteScheme):
         self.mesh_cv = self.compute_mesh_cv()
         self.compute_positions()
         self.post_init()
+        # Persistent dual-layout cell-average buffers.  The SD<->FV layout
+        # switches swap ``dm.U_cv``/``dm.W_cv`` between these fixed arrays
+        # (writing in place) instead of allocating transposed copies each
+        # time, keeping device pointers stable across the run.
+        self.dm.U_cv_sd = self.dm.U_cv
+        self.dm.W_cv_sd = self.dm.W_cv
+        self.dm.U_cv_fv = self.transpose_to_fv(self.dm.U_cv)
+        self.dm.W_cv_fv = self.transpose_to_fv(self.dm.W_cv)
         self.allocate_arrays(ader=self.ader)
         self.init_Boundaries()
         self.create_dicts()
@@ -339,10 +348,22 @@ class SD_Scheme(SemiDiscreteScheme):
     def compute_cv_from_sp(self, M_sp) -> np.ndarray:
         return compute_A_from_B_full(M_sp, self.dm.sp_to_cv, self.ndim)
 
-    def compute_cv_from_sp_fv(self, M_sp) -> np.ndarray:
+    def compute_cv_from_sp_fv(self, M_sp, out=None) -> np.ndarray:
         """Project sp->cv and emit the FV cell-based layout directly,
         fusing the projection and transpose_to_fv into one einsum."""
-        return compute_A_from_B_full_fv(M_sp, self.dm.sp_to_cv, self.ndim)
+        return compute_A_from_B_full_fv(M_sp, self.dm.sp_to_cv, self.ndim, out=out)
+
+    def compute_sp_from_cv_fv(self, M_fv, out=None) -> np.ndarray:
+        """Project FV cell-based averages to solution points directly,
+        fusing the transpose_to_sd and the cv->sp projection."""
+        shape_sd = (
+            [M_fv.shape[0]]
+            + [self.N[dim] for dim in self.dims][::-1]
+            + [self.n[dim] for dim in self.dims][::-1]
+        )
+        return compute_A_from_B_full_from_fv(
+            M_fv, self.dm.cv_to_sp, self.ndim, shape_sd, out=out
+        )
 
     def compute_cp_from_sp(self, M_sp) -> np.ndarray:
         return compute_A_from_B_full(M_sp, self.dm.sp_to_fp, self.ndim)
@@ -599,14 +620,22 @@ class SD_Scheme(SemiDiscreteScheme):
     # ----------------------------------------------------------------
 
     def switch_to_finite_volume(self, integrate_faces=True, ader=False, U_sp=None):
-        """Convert SD element-based arrays to FV cell-based layout."""
-        # Compute control volume averages directly in Finite Volume layout
-        # (projection and layout change fused into a single einsum).
+        """Convert SD element-based arrays to FV cell-based layout.
+
+        ``dm.U_cv``/``dm.W_cv`` are repointed to the persistent FV-layout
+        buffers.  The cell averages are projected from the solution points
+        directly into ``dm.U_cv_fv`` (projection + layout change fused into
+        one contraction, written in place).  ``W_cv`` carries no live data
+        across the switch -- every consumer recomputes the primitives before
+        reading -- so it is repointed without a transpose.
+        """
         U_sp = self.dm.U_sp if U_sp is None else U_sp
-        self.dm.U_cv = self.compute_cv_from_sp_fv(U_sp)
-        self.dm.W_cv = self.transpose_to_fv(self.dm.W_cv)
+        self.compute_cv_from_sp_fv(U_sp, out=self.dm.U_cv_fv)
+        self.dm.U_cv = self.dm.U_cv_fv
+        self.dm.W_cv = self.dm.W_cv_fv
         if self.WB:
-            self.dm.U_eq_cv = self.transpose_to_fv(self.dm.U_eq_cv)
+            # Precomputed at init (time-independent); no per-switch transpose.
+            self.dm.U_eq_cv = self.dm.U_eq_cv_fv
         if integrate_faces:
             for dim in self.dims:
                 self.F_fp[dim][...] = self.integrate_faces(
@@ -614,14 +643,23 @@ class SD_Scheme(SemiDiscreteScheme):
                 )
 
     def switch_to_high_order(self, update_solution_points=True):
-        """Convert FV cell-based arrays back to SD element-based layout."""
-        self.dm.U_cv = self.transpose_to_sd(self.dm.U_cv)
-        self.dm.W_cv = self.transpose_to_sd(self.dm.W_cv)
-        if self.WB:
-            self.dm.U_eq_cv = self.transpose_to_sd(self.dm.U_eq_cv)
-        # Compute solution at solution points
+        """Convert FV cell-based arrays back to SD element-based layout.
+
+        With ``update_solution_points`` (ADER path) the FV-layout cell
+        averages are live: U_sp is recomputed from them with a fused
+        contraction and the SD-layout buffer is refreshed with a strided
+        copy.  Without it (RK path) the SD-layout values are recomputed from
+        U_sp by ``update_solution`` right after, so both solution arrays are
+        just repointed.
+        """
         if update_solution_points:
-            self.dm.U_sp[...] = self.compute_sp_from_cv(self.dm.U_cv)
+            self.dm.U_sp[...] = self.compute_sp_from_cv_fv(self.dm.U_cv)
+            # transpose_to_sd returns a strided view: this is a plain copy.
+            self.dm.U_cv_sd[...] = self.transpose_to_sd(self.dm.U_cv)
+        self.dm.U_cv = self.dm.U_cv_sd
+        self.dm.W_cv = self.dm.W_cv_sd
+        if self.WB:
+            self.dm.U_eq_cv = self.dm.U_eq_cv_sd
 
     # ----------------------------------------------------------------
     # Potential and equilibrium
@@ -654,6 +692,10 @@ class SD_Scheme(SemiDiscreteScheme):
         U_sp = self.compute_conservatives(W_sp)
         self.dm.U_eq_sp = self.crop(U_sp)
         self.dm.U_eq_cv = self.compute_cv_from_sp(self.dm.U_eq_sp)
+        # The equilibrium is time-independent: precompute both layouts once
+        # so the SD<->FV switches just repoint instead of transposing.
+        self.dm.U_eq_cv_sd = self.dm.U_eq_cv
+        self.dm.U_eq_cv_fv = self.transpose_to_fv(self.dm.U_eq_cv)
         for dim in self.dims:
             idim = self.dims[dim]
             vels = np.roll(self.vels, -idim)

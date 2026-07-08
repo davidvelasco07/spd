@@ -133,6 +133,9 @@ class FallbackScheme(FV_Scheme):
             if limiting_variables is not None
             else [self._d_, self._p_]
         )
+        # True only while dm.M is known to hold the current ghosted W_cv
+        # (set around detect_troubles by compute_corrected_fluxes).
+        self._W_ghosts_current = False
         if self.primary is not None:
             self.ader = False
 
@@ -271,29 +274,24 @@ class FallbackScheme(FV_Scheme):
         self.F_fp_FB = {dim: self.dm.__getattribute__(f"F_fp_FB_{dim}") for dim in self.dims}
         self.BC_fp_scalar = {dim: self.dm.__getattribute__(f"BC_fp_scalar_{dim}") for dim in self.dims}
 
-    def working_arrays(self) -> None:
-        """ Create pointers to the working arrays of the primary scheme. """
+    @property
+    def state_dm(self):
+        """The solution state lives on the primary's data manager (when one
+        exists); W_cv/U_cv/U_eq_cv property access resolves through it, so no
+        per-switch pointer refresh is needed."""
         if self.primary is None:
-            dm = self.dm
-        else:
-            dm = self.primary.dm
+            return self.dm
+        return self.primary.dm
 
+    def working_arrays(self) -> None:
+        """Refresh the mesh-coordinate dictionaries from the owning data
+        manager (needed after host/device switches, via create_dicts)."""
+        dm = self.state_dm
         for dim in self.dims:
             self.faces[dim] = dm.__getattribute__(f"{dim.upper()}_fp")
             self.centers[dim] = dm.__getattribute__(f"{dim.upper()}_cv")
             self.h_fp[dim] = dm.__getattribute__(f"d{dim}_fp")
             self.h_cv[dim] = dm.__getattribute__(f"d{dim}_cv")
-
-        #Pointer to the working array
-        self.W_cv = dm.W_cv
-        self.U_cv = dm.U_cv
-
-        # The primary re-creates its equilibrium conservatives on every
-        # SD<->FV layout switch, so mirror the current (FV-layout) array onto
-        # the fallback data manager for the trouble-detection routine, which
-        # reads ``self.dm.U_eq_cv`` directly.
-        if self.WB and self.primary is not None:
-            self.dm.U_eq_cv = dm.U_eq_cv
 
     # ----------------------------------------------------------------
     # Trouble detection
@@ -310,6 +308,28 @@ class FallbackScheme(FV_Scheme):
     # Flux blending
     # ----------------------------------------------------------------
 
+    def _split_sd_axes(self, M):
+        """View an FV cell-based (possibly strided) array with the element and
+        point axes split, in SD element-based order (u, Nz, Ny, Nx, nz, ny, nx).
+
+        Pure stride manipulation (no copy), so SD-layout data can be copied
+        into FV-layout storage in a single strided pass.
+        """
+        Ns = [self.N[dim] for dim in self.dims][::-1]
+        ns = [self.n[dim] for dim in self.dims][::-1]
+        shape = (M.shape[0],) + tuple(Ns) + tuple(ns)
+        s = [M.strides[1 + ax] for ax in range(self.ndim)]
+        strides = (
+            (M.strides[0],)
+            + tuple(ns[ax] * s[ax] for ax in range(self.ndim))
+            + tuple(s)
+        )
+        if CUPY_AVAILABLE and isinstance(M, cp.ndarray):
+            from cupy.lib.stride_tricks import as_strided
+        else:
+            from numpy.lib.stride_tricks import as_strided
+        return as_strided(M, shape=shape, strides=strides)
+
     def store_high_order_fluxes(self, i_ader, ader=True):
         """
         Store the primary scheme's high-order fluxes into the
@@ -318,19 +338,21 @@ class FallbackScheme(FV_Scheme):
         if self.primary is None:
             return
         if "FE" in self.primary.scheme:
-            """ For FE schemes, we need to store the high-order fluxes in the FV face-flux layout. """
+            # For FE schemes the fluxes live in the SD element-based layout.
+            # Copy them straight into a split-axis view of the FV flux array
+            # (single strided copy; no transposed temporary).
             ndim = self.ndim
-            dims = [(0, 1, 2), (0, 1, 3, 2, 4), (0, 1, 4, 2, 5, 3, 6)]
             dims2 = [(0), (0, 1, 2), (0, 1, 3, 2, 4)]
             Nn = [self.N[dim] * self.n[dim] for dim in self.dims][::-1]
             for dim in self.dims:
                 shift = self.dims[dim]
-                shape = [self.nvar] + Nn
                 F = self.get_high_order_fluxes(dim, i_ader, ader)
-                self.F_fp[dim][cut(None, -1, shift)] = np.transpose(
-                    F[cut(None, -1, shift)], dims[ndim - 1]
-                ).reshape(shape)
-                shape.pop(ndim - shift)
+                # Interior faces: n faces per element (last one dropped).
+                self._split_sd_axes(self.F_fp[dim][cut(None, -1, shift)])[
+                    ...
+                ] = F[cut(None, -1, shift)]
+                # Domain-boundary face (last face of the last element).
+                shape = [self.nvar] + Nn[: ndim - 1 - shift] + Nn[ndim - shift :]
                 self.F_fp[dim][indices(-1, shift)] = np.transpose(
                     F[indices2(-1, ndim, shift)], dims2[ndim - 1]
                 ).reshape(shape)
@@ -359,16 +381,26 @@ class FallbackScheme(FV_Scheme):
         Compute the corrected solution with trouble detection and blending.
 
         1. Tentatively apply high-order fluxes (already in F_fp).
-        2. Detect troubled cells.
-        3. Compute MUSCL fluxes into F_fp_FB (not overwriting F_fp/HO).
+        2. Compute MUSCL fluxes into F_fp_FB (not overwriting F_fp/HO).
+        3. Detect troubled cells.
         4. Blend F_fp (HO) and F_fp_FB (MUSCL) based on trouble indicators.
+
+        The MUSCL fluxes are computed *before* the detection: both start from
+        the same ghosted primitive field in ``dm.M``, so when the flux
+        pipeline leaves it untouched (plain MUSCL, no nabla terms) the
+        detection reuses it and skips a redundant ghost fill + boundary/halo
+        exchange.
         """
         self.W_cv[...] = self.primary.compute_primitives_cv(self.U_cv)
         # Tentative HO update for trouble detection; F_fp still holds HO fluxes
         self.apply_fluxes(dt)
-        self.detect_troubles()
         # Redirect compute_fluxes output to F_fp_FB so HO fluxes in F_fp survive
         self.compute_fluxes(self.F_fp_FB, dt)
+        self._W_ghosts_current = self.scheme == "MUSCL" and not (
+            self.viscosity or self.thdiffusion
+        )
+        self.detect_troubles()
+        self._W_ghosts_current = False
         # Blend: F_fp = HO, F_fp_FB = MUSCL
         self.correct_fluxes()
 
@@ -411,10 +443,7 @@ class FallbackScheme(FV_Scheme):
 
     def update_solution(self, dU):
         if self.primary is not None:
-            self.primary.update_solution(dU)
-            # Refresh pointer after primary may have reallocated U_cv
-            self.working_arrays()
-            return
+            return self.primary.update_solution(dU)
         return super().update_solution(dU)
 
     def compute_update(self, U, ader=False, prims=False, **kwargs):
@@ -424,16 +453,14 @@ class FallbackScheme(FV_Scheme):
 
         self.primary.solve_faces(U, ader=ader, prims=prims)
         self.primary.switch_to_finite_volume(U_sp=U)
-        self.working_arrays()
         self.store_high_order_fluxes(0, ader=ader)
         self.compute_corrected_fluxes(self.dt)
-        # Compute dU/dt in FV layout, then reshape to primary (SD) layout
+        # Project dU/dt from the FV layout straight to solution points
+        # (layout change and projection fused into one contraction).
         dUdt_fv = self.compute_dudt(self.U_cv)
-        dUdt_sd = self.primary.transpose_to_sd(dUdt_fv)
-        dUdt_sd = self.primary.compute_sp_from_cv(dUdt_sd)
+        dUdt_sp = self.primary.compute_sp_from_cv_fv(dUdt_fv)
         self.primary.switch_to_high_order(update_solution_points=False)
-        self.working_arrays()
-        return dUdt_sd
+        return dUdt_sp
 
     def ader_predictor(self, prims: bool = False) -> None:
         """Perform the ADER predictor step.
@@ -465,11 +492,7 @@ class FallbackScheme(FV_Scheme):
     def switch_to_finite_volume(self, ader=False):
         """Convert SD element-based arrays to FV cell-based layout."""
         self.primary.switch_to_finite_volume(ader=ader)
-        #Update pointers to the working arrays
-        self.working_arrays()
-    
+
     def switch_to_high_order(self):
         """Convert FV cell-based arrays back to SD element-based layout."""
         self.primary.switch_to_high_order()
-        #Update pointers to the working arrays
-        self.working_arrays()
