@@ -106,6 +106,7 @@ class FallbackScheme(FV_Scheme):
         min_P=1e-10,
         godunov=False,
         limiting_variables=None,
+        max_revs=5,
     ):
         super().__init__(
             sim,
@@ -127,6 +128,11 @@ class FallbackScheme(FV_Scheme):
         self.max_rho = max_rho
         self.min_P = min_P
         self.godunov = godunov
+        # MOOD cascade (used when blending is off): number of fallback levels
+        # beyond the base scheme -- hardwired to [MUSCL(-Hancock), 1st order]
+        # -- and the maximum number of detection/revision sweeps per update.
+        self.n_cascade = 2
+        self.max_revs = max_revs
         # Default: check density and pressure.
         self.limiting_variables = (
             limiting_variables
@@ -254,6 +260,25 @@ class FallbackScheme(FV_Scheme):
                 f"BC_fp_scalar_{dim}",
                 self.array_BC(dim=dim),
             )
+        if self.use_mood:
+            # MOOD cascade: ghosted per-cell cascade index and the per-level
+            # flux sets (level 0 = base/high order, 1 = MUSCL(-Hancock),
+            # 2 = first order).
+            self.dm.cascade = self.array(1, ngh=self.Nghc)
+            for dim in self.dims:
+                self.dm.__setattr__(
+                    f"F_fp_HO_{dim}", self.array(self.nvar, dim=dim)
+                )
+                self.dm.__setattr__(
+                    f"F_fp_FB2_{dim}", self.array(self.nvar, dim=dim)
+                )
+
+    @property
+    def use_mood(self):
+        """The MOOD cascade replaces the single-pass theta blend whenever the
+        neighbor-spreading blend is off (superfv-style: blending and cascade
+        revisions are mutually exclusive)."""
+        return not self.blending and not self.godunov
 
     def allocate_arrays(self, ader=False):
         """Allocate arrays.  When a primary exists, super() will allocate the
@@ -273,6 +298,13 @@ class FallbackScheme(FV_Scheme):
         super().create_dicts()
         self.F_fp_FB = {dim: self.dm.__getattribute__(f"F_fp_FB_{dim}") for dim in self.dims}
         self.BC_fp_scalar = {dim: self.dm.__getattribute__(f"BC_fp_scalar_{dim}") for dim in self.dims}
+        if self.use_mood and getattr(self.dm, "cascade", None) is not None:
+            self.F_fp_HO = {
+                dim: self.dm.__getattribute__(f"F_fp_HO_{dim}") for dim in self.dims
+            }
+            self.F_fp_FB2 = {
+                dim: self.dm.__getattribute__(f"F_fp_FB2_{dim}") for dim in self.dims
+            }
 
     @property
     def state_dm(self):
@@ -378,8 +410,12 @@ class FallbackScheme(FV_Scheme):
 
     def compute_corrected_fluxes(self, dt):
         """
-        Compute the corrected solution with trouble detection and blending.
+        Compute the corrected fluxes with trouble detection.
 
+        MOOD path (blending off): iterative cascade of detection/revision
+        sweeps over the flux levels [high order, MUSCL(-Hancock), 1st order].
+
+        Blending path: single sweep --
         1. Tentatively apply high-order fluxes (already in F_fp).
         2. Compute MUSCL fluxes into F_fp_FB (not overwriting F_fp/HO).
         3. Detect troubled cells.
@@ -392,6 +428,8 @@ class FallbackScheme(FV_Scheme):
         exchange.
         """
         self.W_cv[...] = self.primary.compute_primitives_cv(self.U_cv)
+        if self.use_mood:
+            return self.mood_loop(dt)
         # Tentative HO update for trouble detection; F_fp still holds HO fluxes
         self.apply_fluxes(dt)
         # Redirect compute_fluxes output to F_fp_FB so HO fluxes in F_fp survive
@@ -403,6 +441,105 @@ class FallbackScheme(FV_Scheme):
         self._W_ghosts_current = False
         # Blend: F_fp = HO, F_fp_FB = MUSCL
         self.correct_fluxes()
+
+    # ----------------------------------------------------------------
+    # MOOD cascade
+    # ----------------------------------------------------------------
+
+    def compute_first_order_fluxes(self, F):
+        """First-order Godunov fluxes: face states are the adjacent cell
+        values of the start-of-node primitives (no reconstruction, no time
+        prediction) -- the terminal, unconditionally robust cascade level."""
+        ngh = self.Nghc
+        self.dm.M[...] = 0
+        self.fill_active_region(self.W_cv)
+        self.Boundaries(self.dm.M)
+        M = self.dm.M
+        for dim in self.dims:
+            idim = self.dims[dim]
+            crop = lambda start, end: crop_fv(start, end, idim, self.ndim, ngh)
+            self.ML_fp[dim][...] = M[crop(1, -2)]
+            self.MR_fp[dim][...] = M[crop(2, -1)]
+            self.solve_riemann_problem(dim, F[dim], prims=True)
+
+    def cascade_face_mask(self, dim):
+        """Per-face cascade level: max of the two adjacent cells' levels
+        (from the ghosted ``dm.cascade``)."""
+        ngh = self.Nghc
+        idim = self.dims[dim]
+        crop = lambda start, end: crop_fv(start, end, idim, self.ndim, ngh)
+        c = self.dm.cascade[0]
+        return np.maximum(c[crop(ngh - 1, -ngh)], c[crop(ngh, -(ngh - 1))])
+
+    def assign_cascade_fluxes(self, i_max_computed):
+        """Assemble ``F_fp`` per face from the per-level flux sets according
+        to the face cascade mask (level of a face = max of its two cells)."""
+        levels = [self.F_fp_HO, self.F_fp_FB, self.F_fp_FB2]
+        for dim in self.dims:
+            mask = self.cascade_face_mask(dim)
+            F = self.F_fp[dim]
+            F[...] = levels[0][dim]
+            for i in range(1, i_max_computed + 1):
+                F[...] = np.where(mask == i, levels[i][dim], F)
+
+    def mood_hook_start(self, dt):
+        """Hook for coupled schemes (MHD): the level-1 (MUSCL) fluxes have
+        just been computed and ``dm.M`` holds the ghosted (possibly
+        Hancock-predicted) primitives; prepare matching level-1 data."""
+
+    def mood_hook_candidate(self, dt):
+        """Hook for coupled schemes (MHD): update auxiliary candidate data
+        for the current flux/E assembly before detection."""
+
+    def mood_hook_level(self, level):
+        """Hook for coupled schemes (MHD): a new cascade level's fluxes have
+        just been computed (``dm.M`` holds the ghosted start-of-node
+        primitives); prepare the matching auxiliary level (edge E)."""
+
+    def mood_loop(self, dt):
+        """superfv-style MOOD loop with the cascade hardwired to
+        [base/high-order, MUSCL(-Hancock), first order].
+
+        Each sweep builds the candidate update from the current per-face flux
+        assembly, runs NAD/PAD detection on it, and demotes still-troubled
+        cells one cascade level.  Because a revision changes the fluxes of
+        neighboring cells too, the loop continues until no *revisable*
+        troubled cell remains (or ``max_revs`` sweeps were done).  Cells at
+        the terminal (first-order) level are no longer revisable.
+        """
+        dm = self.dm
+        # Level 0: high-order node fluxes (currently in F_fp).
+        for dim in self.dims:
+            self.F_fp_HO[dim][...] = self.F_fp[dim]
+        # Level 1: MUSCL(-Hancock) fluxes.
+        self.compute_fluxes(self.F_fp_FB, dt)
+        self.mood_hook_start(dt)
+        i_max_computed = 1
+        # Ghosted per-cell cascade index (float array; levels are small ints).
+        dm.cascade[...] = 0
+        interior = (Ellipsis,) + (slice(self.Nghc, -self.Nghc),) * self.ndim
+        cascade_in = dm.cascade[0][interior]
+
+        for _ in range(self.max_revs):
+            self.apply_fluxes(dt)
+            self.mood_hook_candidate(dt)
+            self.detect_troubles()
+            troubles = dm.troubles[0]
+            revisable = troubles * (cascade_in < self.n_cascade)
+            if float(revisable.sum()) == 0:
+                break
+            cascade_in += revisable
+            # Refresh the ghost layers of the cascade index (face masks read
+            # neighbor levels across element/domain boundaries).
+            dm.M[...] = 0
+            self.fill_active_region(cascade_in)
+            self.Boundaries_scalar(dm.M)
+            dm.cascade[0][...] = dm.M[0]
+            if int(cascade_in.max()) > i_max_computed:
+                self.compute_first_order_fluxes(self.F_fp_FB2)
+                self.mood_hook_level(2)
+                i_max_computed = 2
+            self.assign_cascade_fluxes(i_max_computed)
 
     # ----------------------------------------------------------------
     # Solution state delegation to primary (for RK integrator)

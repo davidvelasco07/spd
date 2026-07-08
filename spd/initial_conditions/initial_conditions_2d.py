@@ -104,7 +104,10 @@ def orszag_tang(xy: np.ndarray, case: int, gamma=5.0 / 3.0):
     """
     x = xy[0]
     y = xy[1]
-    B0 = 1.0 / np.sqrt(4.0 * np.pi)
+    # Code units (magnetic pressure B^2/2): the canonical pairing is
+    # rho = gamma^2, p = gamma, B0 = 1 (equivalent to the Gaussian-units
+    # setup rho = 25/36pi, p = 5/12pi, B0 = 1/sqrt(4pi)).
+    B0 = 1.0
     if case == 0:
         return gamma**2 * np.ones(x.shape)
     elif case == 1:
@@ -126,7 +129,7 @@ def orszag_tang_Az(mesh: np.ndarray, j: int):
     Bx = dAz/dy, By = -dAz/dx."""
     x = mesh[0]
     y = mesh[1]
-    B0 = 1.0 / np.sqrt(4.0 * np.pi)
+    B0 = 1.0
     if j == 2:
         return B0 * (
             np.cos(4 * np.pi * x) / (4 * np.pi) + np.cos(2 * np.pi * y) / (2 * np.pi)

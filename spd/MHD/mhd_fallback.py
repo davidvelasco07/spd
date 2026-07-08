@@ -2,15 +2,19 @@
 MHD fallback: child of the hydro flux-blending fallback and the induction
 (constrained-transport) fallback.
 
-Per ADER time node, the detection tests the *full* candidate state: the
-hydro candidate ``U_new`` with its B rows replaced by the cell average of
-the candidate constrained-transport field (high-order CT update applied
-provisionally), so NAD bounds act on the true new B and the PAD pressure
-includes its magnetic contribution.  The resulting trouble indicator drives
-both the hydro flux blending and the blending of the edge E-field (high
-order vs four-state LLF from MUSCL-reconstructed corner states), keeping the
-face-staggered B limited at shocks while divergence-free to machine
-precision.
+The correction is a MOOD cascade (superfv-style), hardwired to the levels
+[high order, MUSCL(-Hancock), first order] for both the conserved fluxes and
+the edge E-field.  Per ADER time node, each detection sweep tests the *full*
+candidate state: the hydro candidate ``U_new`` with its B rows replaced by
+the cell average of the candidate constrained-transport update from the
+current edge-E assembly, so NAD bounds act on the true new B and the PAD
+pressure includes its magnetic contribution.  Cells failing the check are
+demoted one cascade level and the sweep repeats (a revision changes the
+neighbors' updates too), until every revisable cell is admissible or
+``max_revs`` sweeps were done.  The low-order E levels are built from the
+same running subcell state as the low-order fluxes -- never from the
+(unlimited) ADER predictor.  All E assemblies are single-valued on the edge
+lattice, so div(B) = 0 is preserved to machine precision.
 """
 
 import numpy as np
@@ -22,8 +26,8 @@ from spd.induction.induction_sd_scheme import InductionSD_Scheme
 
 class MHDFallbackScheme(FallbackScheme, InductionFallbackScheme):
     """
-    MUSCL flux blending for the conserved MHD state + theta-blended
-    constrained transport for the face-staggered magnetic field.
+    MOOD-cascade correction for the conserved MHD state (flux levels) and
+    the face-staggered magnetic field (edge E-field levels).
     """
 
     def __init__(self, sim, **kwargs):
@@ -34,9 +38,12 @@ class MHDFallbackScheme(FallbackScheme, InductionFallbackScheme):
                 sim.b[dim] for dim in sim.dims
             ]
         super().__init__(sim, **kwargs)
-        # Cell-averaged candidate CT field of the current ADER node (set in
-        # ader_update, consumed by detect_troubles).
+        # Per-node edge-E cascade levels (0 = high order, 1 = MUSCL corners,
+        # 2 = first order) and the candidate cell-averaged CT field consumed
+        # by detect_troubles.
+        self._E_levels = {}
         self._B_cand = None
+        self._with_ct = False
 
     def _has_ct_edges(self):
         """True when at least one edge E-family has both transverse
@@ -47,15 +54,31 @@ class MHDFallbackScheme(FallbackScheme, InductionFallbackScheme):
                 return True
         return False
 
-    def _node_low_order_E(self, i_ader):
-        """Low-order edge E-field evaluated from the ADER predictor state at
-        time node ``i_ader`` (projected to subcell averages, ghosted)."""
-        prim = self.primary
-        U_sd = prim.compute_cv_from_sp(prim.dm.U_ader[:, i_ader])
-        W_fv = self._sim.compute_primitives(prim.transpose_to_fv(U_sd))
-        self.fill_active_region(W_fv)
-        self.Boundaries(self.dm.M)
-        return self.compute_low_order_E(self.dm.M)
+    # ----------------------------------------------------------------
+    # MOOD hooks: edge-E cascade levels and per-sweep candidate B
+    # ----------------------------------------------------------------
+
+    def mood_hook_start(self, dt):
+        """Level-1 edge E (MUSCL corner states) from the same ghosted
+        primitives the level-1 fluxes were just built from (``dm.M``; for
+        MUSCL-Hancock this is the time-centered Hancock-predicted state,
+        consistent with the level-1 fluxes)."""
+        if self._with_ct:
+            self._E_levels[1] = self.compute_low_order_E(self.dm.M, muscl=True)
+
+    def mood_hook_level(self, level):
+        """Terminal level: first-order (unreconstructed) edge E from the
+        ghosted start-of-node primitives just used for the first-order
+        fluxes (``dm.M``)."""
+        if self._with_ct and level == 2:
+            self._E_levels[2] = self.compute_low_order_E(self.dm.M, muscl=False)
+
+    def mood_hook_candidate(self, dt):
+        """Candidate cell-averaged B from the current edge-E assembly, for
+        the admissibility check of this sweep's detection."""
+        if self._with_ct:
+            E = self.mood_edge_E(self._E_levels, self.dm.cascade)
+            self._B_cand = self.candidate_cell_B(self.ct_dB(E, dt))
 
     def detect_troubles(self):
         # The true candidate B is the constrained-transport one: replace the
@@ -67,45 +90,69 @@ class MHDFallbackScheme(FallbackScheme, InductionFallbackScheme):
                 self.dm.U_new[sim.b[dim]] = Bc
         super().detect_troubles()
 
+    # ----------------------------------------------------------------
+    # Coupled corrector
+    # ----------------------------------------------------------------
+
     def ader_update(self):
-        """Coupled corrector with trouble detection, per ADER time node:
+        """Coupled corrector, per ADER time node:
 
-        1. Low-order edge E from the predictor state at the node; candidate
-           cell-averaged B from the provisional high-order CT update.
-        2. Hydro detection on the full candidate state (U_new with candidate
-           B rows) + flux blending, as in the hydro fallback.
-        3. Blended CT update of the face B for the node with the same theta.
+        1. High-order node fluxes and edge E form cascade level 0; the MOOD
+           loop builds the low-order levels, runs the detection sweeps on
+           the full candidate state (hydro + candidate CT B) and demotes
+           troubled cells.
+        2. The hydro state is advanced with the final flux assembly; the
+           face B field with the CT update from the final edge-E assembly.
 
-        After the loop, the CT field is re-projected onto the cell-centered
-        B rows.
+        After the node loop, the CT field is re-projected onto the
+        cell-centered B rows.
         """
         if self.primary is None:
             return super().ader_update()
         prim = self.primary
         self.switch_to_finite_volume(ader=True)
         w_tp = self.dm.w_tp
-        with_ct = self._has_ct_edges()
+        self._with_ct = self._has_ct_edges() and self.use_mood
 
         for i_ader in range(self.nader):
             dt_i = self.dt * w_tp[i_ader]
-            E_hi = E_lo = None
-            if with_ct:
-                # dm.M is scratch shared with the detection below, so gather
-                # the node's low-order E first.
-                E_lo = self._node_low_order_E(i_ader)
-                E_hi = {
-                    dim: prim.E_ader_ep[dim][0][i_ader] for dim in E_lo
+            if self._with_ct:
+                self._E_levels = {
+                    0: {
+                        dim: prim.E_ader_ep[dim][0][i_ader]
+                        for dim in self.Edims
+                        if all(
+                            d in self.dims for d in prim.other_dims(dim)
+                        )
+                    }
                 }
-                self._B_cand = self.candidate_cell_B(self.ct_dB(E_hi, dt_i))
             self.store_high_order_fluxes(i_ader, ader=True)
             self.compute_corrected_fluxes(dt_i)
             self.U_cv -= self.compute_dudt(self.U_cv) * dt_i
-            if with_ct:
-                theta_node = 1.0 if self.godunov else self.dm.theta
-                self.blended_ct_node_update(E_hi, E_lo, dt_i, theta_node)
+            if self._with_ct:
+                # CT update from the final (post-revision) edge-E assembly.
+                E_fin = self.mood_edge_E(self._E_levels, self.dm.cascade)
+                dB = self.ct_dB(E_fin, dt_i)
+                for dim in self.dims:
+                    prim.B_fp[dim] -= dB[dim]
+            elif self._has_ct_edges():
+                # Godunov / theta-blending path: level-1 (MUSCL corners) E
+                # from the ghosted primitives of this node's MUSCL flux pass
+                # (dm.M), blended with the high-order node E by theta
+                # (godunov: theta = 1, i.e. the fallback E everywhere --
+                # consistent with the fallback fluxes used for the update).
+                E_hi = {
+                    dim: prim.E_ader_ep[dim][0][i_ader]
+                    for dim in self.Edims
+                    if all(d in self.dims for d in prim.other_dims(dim))
+                }
+                E_lo = self.compute_low_order_E(self.dm.M, muscl=True)
+                theta = 1.0 if self.godunov else self.dm.theta
+                self.blended_ct_node_update(E_hi, E_lo, dt_i, theta)
         self._B_cand = None
+        self._E_levels = {}
 
-        if not with_ct:
+        if not self._has_ct_edges():
             # Degenerate CT (e.g. 1D): plain high-order update of B.
             InductionSD_Scheme.ader_update(prim)
         self.switch_to_high_order()

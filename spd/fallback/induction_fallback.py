@@ -83,14 +83,16 @@ class InductionFallbackScheme:
     # Low-order (four-state LLF, MUSCL-reconstructed) edge electric field
     # ----------------------------------------------------------------
 
-    def compute_low_order_E(self, W_gh):
+    def compute_low_order_E(self, W_gh, muscl=True):
         """
         Four-state LLF-CT electric field at the primary's edge points from
         the ghosted subcell primitives ``W_gh``.
 
-        The four corner states are MUSCL reconstructions of the adjacent
-        subcells (limited half-slopes along both transverse directions,
-        same limiter as the hydro fallback).  For E-family ``dim`` with
+        With ``muscl=True`` (cascade level 1) the four corner states are
+        MUSCL reconstructions of the adjacent subcells (limited half-slopes
+        along both transverse directions, same limiter as the hydro
+        fallback); with ``muscl=False`` (terminal level, first order) the
+        subcell values are used unreconstructed.  For E-family ``dim`` with
         transverse directions (dim1, dim2), using the code convention
         E = v1*B2 - v2*B1:
 
@@ -112,9 +114,10 @@ class InductionFallbackScheme:
             # Limited half-slopes aligned with the ghosted array (the
             # outermost ghost layer keeps zero slope; it is never gathered).
             S1 = np.zeros_like(W_gh)
-            S1[cut(1, -1, i1)] = self.compute_slopes(W_gh, i1)
             S2 = np.zeros_like(W_gh)
-            S2[cut(1, -1, i2)] = self.compute_slopes(W_gh, i2)
+            if muscl:
+                S1[cut(1, -1, i1)] = self.compute_slopes(W_gh, i1)
+                S2[cut(1, -1, i2)] = self.compute_slopes(W_gh, i2)
             r_v1 = sim.vels[i1]
             r_v2 = sim.vels[i2]
             rows = [r_v1, r_v2, sim.b[dim1], sim.b[dim2], sim.b[dim],
@@ -159,17 +162,20 @@ class InductionFallbackScheme:
     # Theta-blended constrained-transport update
     # ----------------------------------------------------------------
 
-    def edge_theta(self, dim, theta_gh):
-        """Trouble indicator pooled to the edge lattice of E-family ``dim``
-        (max over the adjacent subcells)."""
+    def edge_pool(self, dim, field_gh):
+        """Ghosted cell field (trouble indicator or cascade index) pooled to
+        the edge lattice of E-family ``dim`` (max over adjacent subcells)."""
         dim1, dim2 = self.primary.other_dims(dim)
         idx = self._edge_gather_indices(dim)
         th = None
         for o1 in (-1, 0):
             for o2 in (-1, 0):
-                t = self._edge_gather(theta_gh, 0, idx, {dim1: o1, dim2: o2})
+                t = self._edge_gather(field_gh, 0, idx, {dim1: o1, dim2: o2})
                 th = t if th is None else np.maximum(th, t)
         return th
+
+    # Backwards-compatible name for the theta pooling.
+    edge_theta = edge_pool
 
     def ct_dB(self, E, dt_i):
         """Face-B increments ``dt_i * curl(E)`` from a dict of single-valued
@@ -204,6 +210,22 @@ class InductionFallbackScheme:
             )
             rows[dim] = prim.transpose_to_fv(prim.compute_cv_from_sp(B_sp))[0]
         return rows
+
+    def mood_edge_E(self, E_levels, cascade_gh):
+        """Per-edge assembly of the edge E-field from the MOOD cascade:
+        the level of an edge is the max cascade index of its adjacent
+        subcells; each edge takes the E of its level (0 = high order,
+        1 = MUSCL corners, 2 = first order)."""
+        E = {}
+        for dim, E_hi in E_levels[0].items():
+            mask = self.edge_pool(dim, cascade_gh)
+            e = E_hi
+            for lvl in (1, 2):
+                E_l = E_levels.get(lvl)
+                if E_l is not None:
+                    e = np.where(mask == lvl, E_l[dim], e)
+            E[dim] = e
+        return E
 
     def blended_ct_node_update(self, E_hi, E_lo, dt_i, theta_gh):
         """
