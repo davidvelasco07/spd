@@ -1,7 +1,7 @@
 import pytest
 import sys
 import numpy as np
-from spd.sdfb_simulator import SDFB_Simulator
+from spd.spd_simulator import SPD_Simulator as SDFB_Simulator
 from spd.spectral_difference.sd_simulator import SD_Simulator
 from spd.finite_volume.fv_simulator import FV_Simulator
 

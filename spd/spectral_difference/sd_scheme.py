@@ -44,8 +44,12 @@ class SD_Scheme(SemiDiscreteScheme):
         Name of the Riemann solver ('llf', 'hllc', 'lhllc').
     """
 
-    def __init__(self, sim, riemann_solver="llf", soe="hydro"):
+    def __init__(self, sim, riemann_solver="llf", soe=None):
         super().__init__(sim)
+        if soe is None:
+            # Pure induction runs use hydro-style states for the velocity
+            # field; only full MHD needs the MHD flux/Riemann branch.
+            soe = "mhd" if sim.soe == "mhd" else "hydro"
         self.x, self.w = gauss_legendre_quadrature(0.0, 1.0, self.p)
         sp = solution_points(0.0, 1.0, self.p)
         fp = flux_points(0.0, 1.0, self.p)

@@ -95,6 +95,45 @@ def sine_wave(xy: np.ndarray,case: int, A=0.125, vx=1, vy=1, P=1):
     else:
         return np.zeros(x.shape)
 
+def orszag_tang(xy: np.ndarray, case: int, gamma=5.0 / 3.0):
+    """Orszag-Tang vortex (ideal MHD) on the unit square, periodic BCs.
+
+    Variable order: rho, vx, vy, vz, P, Bx, By, Bz.  The cell-centered B
+    returned here is only an initial guess; the divergence-free staggered
+    field must come from :func:`orszag_tang_Az` via the vector potential.
+    """
+    x = xy[0]
+    y = xy[1]
+    B0 = 1.0 / np.sqrt(4.0 * np.pi)
+    if case == 0:
+        return gamma**2 * np.ones(x.shape)
+    elif case == 1:
+        return -np.sin(2 * np.pi * y)
+    elif case == 2:
+        return np.sin(2 * np.pi * x)
+    elif case == 4:
+        return gamma * np.ones(x.shape)
+    elif case == 5:
+        return -B0 * np.sin(2 * np.pi * y)
+    elif case == 6:
+        return B0 * np.sin(4 * np.pi * x)
+    else:
+        return np.zeros(x.shape)
+
+
+def orszag_tang_Az(mesh: np.ndarray, j: int):
+    """z-component of the vector potential for the Orszag-Tang field:
+    Bx = dAz/dy, By = -dAz/dx."""
+    x = mesh[0]
+    y = mesh[1]
+    B0 = 1.0 / np.sqrt(4.0 * np.pi)
+    if j == 2:
+        return B0 * (
+            np.cos(4 * np.pi * x) / (4 * np.pi) + np.cos(2 * np.pi * y) / (2 * np.pi)
+        )
+    return np.zeros(x.shape)
+
+
 def RTI(
     xy: np.ndarray,
     case: int,

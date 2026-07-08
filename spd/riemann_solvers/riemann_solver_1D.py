@@ -39,12 +39,17 @@ class Riemann_solver_1D:
             return rs.llf(*args,**kwargs)
         elif self.soe == "mhd":
             return mrs.llf(*args,**kwargs)
-    
+
+    def llf_mhd(self,*args,**kwargs):
+        # Backward-compatible name from the monolithic code; the MHD branch
+        # is normally selected through soe="mhd" with name "llf".
+        return mrs.llf(*args,**kwargs)
+
     def hllc(self,*args,**kwargs):
         if self.soe == "hydro":
             return rs.hllc(*args,**kwargs)
         elif self.soe == "mhd":
-            return mrs.hllc(*args,**kwargs)
+            raise NotImplementedError("HLLC is not implemented for MHD; use llf")
 
     def lhllc(self,*args,**kwargs):
         return rs.lhllc(*args,**kwargs)

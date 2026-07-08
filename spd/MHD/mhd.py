@@ -32,10 +32,11 @@ def compute_primitives(
 
     """
     shift = _p_+kwargs["thdiffusion"]+kwargs["npassive"]
-    if not("W" in kwargs):
-        W = U.copy()
     W = hydro.compute_primitives(U,vels,_p_,gamma,**kwargs)
     for vel in vels:
+        # B is the same in both bases; refresh it in W (the hydro routine
+        # only fills the core fields when an output array W is supplied).
+        W[vel+shift] = U[vel+shift]
         W[_p_] -= (gamma-1)*0.5*W[vel+shift]**2
     return W
                 
@@ -64,10 +65,9 @@ def compute_conservatives(
     U:      Solution array of conseved variables
     """
     shift = _p_+kwargs["thdiffusion"]+kwargs["npassive"]
-    if not("U" in kwargs):
-        U = W.copy()
-    U = hydro.compute_conservatives(W,vels,_p_,gamma,**kwargs)
+    U = hydro.compute_conservatives(W,vels,_p_,gamma,U=U,**kwargs)
     for vel in vels:
+        U[vel+shift] = W[vel+shift]
         U[_p_] += 0.5*W[vel+shift]**2
     return U
 

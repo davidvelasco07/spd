@@ -56,7 +56,7 @@ class Simulator:
         beta: float = 2.0 / 3,
         nu: float = 1e-4,
         chi: float = 1e-4,
-        cfl_coeff: float = 0.8,
+        cfl_coeff: float = 0.4,
         min_c2: float = 1e-10,
         viscosity: bool = False,
         thdiffusion: bool = False,
@@ -265,8 +265,13 @@ class Simulator:
             self.variables.extend([f"$B_{d}$" for d in self.dims])
             self.variables.extend([r"$B^2$", r"$S$"])
         if self.soe == "mhd":
+            # All three B components live in the state vector regardless of
+            # ndim (the MHD fluxes and fast-speed need the out-of-plane field,
+            # e.g. Bz in 2D).  Only the in-plane components are face-staggered
+            # and evolved by constrained transport; the rest evolve as
+            # cell-centered conserved variables.
             self.b = {}
-            for dim in self.dims:
+            for dim in "xyz":
                 name = f"$B_{dim}$"
                 self.variables.append(name)
                 self.__setattr__(f"_b{dim}_", self.nvar)

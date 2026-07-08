@@ -41,12 +41,14 @@ class FV_Scheme(SemiDiscreteScheme):
         self,
         sim,
         riemann_solver="llf",
-        equations="hydro",
+        equations=None,
         slope_limiter="minmod",
         scheme="MUSCL-Hancock",
         dm=None,
     ):
         super().__init__(sim)
+        if equations is None:
+            equations = "mhd" if sim.soe == "mhd" else "hydro"
         self.riemann_solver = rs1d(riemann_solver, equations).solver
         self.slope_limiter = muscl.Slope_limiter(slope_limiter)
         self.scheme = scheme
@@ -558,6 +560,7 @@ class FV_Scheme(SemiDiscreteScheme):
             self.min_c2,
             prims,
             npassive=self.npassive,
+            thdiffusion=self.thdiffusion,
         )
         if self.WB:
             F -= self.dm.__getattribute__(f"F_eq_fp_{dim}")

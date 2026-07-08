@@ -77,7 +77,7 @@ class InductionSD_Scheme(SD_Scheme):
     def _allocate_induction_ader_arrays(self, ader: bool) -> None:
         dims_map = ["yz", "zx", "xy"]
         for dim, idim in zip(self.Edims, self.Eidims):
-            E_ep = self.array_fp(dims=dims_map[idim], ader=ader)
+            E_ep = self.array_fp(dims=dims_map[idim], ader=ader, nvar=self._E_NVAR)
             self.dm.__setattr__(f"E{dim}_ader_ep", E_ep)
             for dim2 in self.other_dims(dim):
                 self.dm.__setattr__(
@@ -360,7 +360,7 @@ class InductionSD_Scheme(SD_Scheme):
             B1 = self.compute_fp_from_sp(B1[na], dim2)[0]
             B2 = self.dm.__getattribute__(f"B{dim2}_fp")
             B2 = self.compute_fp_from_sp(B2[na], dim1)[0]
-            E_ep = self.array_fp(dims=dim1 + dim2)
+            E_ep = self.array_fp(dims=dim1 + dim2, nvar=self._E_NVAR)
             self.fill_E_array(E_ep, B1, B2, dim)
             for d2 in self.other_dims(dim):
                 BC = self.dm.__getattribute__(f"BC_E{dim}_ep_{d2}")
@@ -458,19 +458,33 @@ class MHDInductionSD_Scheme(InductionSD_Scheme):
     def post_init(self) -> None:
         SD_Scheme.post_init(self)
         self._init_B_from_vector_potential()
+        # Overwrite the cell-centered B rows of U with the (divergence-free)
+        # face-staggered CT field, then refresh the derived states.
+        sim = self._sim
+        for dim in self.dims:
+            B = self.dm.__getattribute__(f"B{dim}_fp")
+            self.dm.U_sp[sim.b[dim]] = self.compute_sp_from_fp(
+                B[np.newaxis], dim=dim
+            )[0]
+        self.dm.W_sp[...] = self.compute_primitives(self.dm.U_sp)
+        self.dm.U_cv[...] = self.compute_cv_from_sp(self.dm.U_sp)
+        self.dm.W_cv[...] = self.compute_cv_from_sp(self.dm.W_sp)
         self._sync_W_cp_from_primitives()
 
     def add_nabla_terms(self, ader=True):
+        # Hydro viscous/thermal fluxes only (invoked from solve_faces).  The
+        # resistive correction to the edge E-field must run after solve_edges,
+        # so the coupled predictor adds it separately.
         SD_Scheme.add_nabla_terms(self, ader=ader)
-        if self.nu > 0:
-            InductionSD_Scheme.add_nabla_terms(self)
 
     def compute_vels(self, dim, dim1, dim2, ader=False):
         sim = self._sim
         if ader:
-            Ua = self.dm.U_ader
+            # M_fp[dim1] holds the conservative ADER state at the dim1 flux
+            # points (filled by solve_faces, boundaries applied); one more
+            # interpolation along dim2 lands on the edge points.
             W = self.compute_primitives(
-                self.compute_fp_from_sp(Ua, dim=dim2, ader=True)
+                self.compute_fp_from_sp(self.M_fp[dim1], dim=dim2, ader=True)
             )
         else:
             W = self.compute_fp_from_sp(self.dm.W_sp, dim=dim1)
@@ -495,7 +509,7 @@ class MHDInductionSD_Scheme(InductionSD_Scheme):
         return self.llf_E(EL, ER, _v1_, gamma=self._sim.gamma, min_c2=self._sim.min_c2)
 
     def llf_E(self, E_L, E_R, vel, *args, **kwargs):
-        import mhd
+        from spd.MHD import mhd
 
         B1_L = E_L[1]
         B1_R = E_R[1]

@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from spd.sdfb_simulator import SDFB_Simulator
+from spd.spd_simulator import SPD_Simulator as SDFB_Simulator
 
 tolerance=1E-14
 N=6

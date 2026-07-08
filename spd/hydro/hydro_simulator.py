@@ -1,22 +1,19 @@
 """
-Spectral Difference with Fallback Blending Simulator.
-
-Uses SD_Scheme as the primary high-order spatial scheme and
-FallbackScheme for robust shock capturing via MUSCL/MUSCL-Hancock
-with trouble detection and flux blending.
+Hydro simulator: high-order Spectral Difference (or Finite Volume) with an
+optional MUSCL/MUSCL-Hancock fallback (trouble detection + flux blending).
 """
 
 import numpy as np
 
-from .simulator import Simulator
-from .runtime.data_management import CupyLocation
-from .spectral_difference.sd_scheme import SD_Scheme
-from .finite_volume.fv_scheme import FV_Scheme
-from .fallback import FallbackScheme
-from .schemes.scheme import SemiDiscreteScheme
+from spd.simulator import Simulator
+from spd.runtime.data_management import CupyLocation
+from spd.spectral_difference.sd_scheme import SD_Scheme
+from spd.finite_volume.fv_scheme import FV_Scheme
+from spd.fallback import FallbackScheme
+from spd.schemes.scheme import SemiDiscreteScheme
 
 
-class SPD_Simulator(Simulator):
+class HydroSimulator(Simulator):
     """
     Simulator combining high-order SD with MUSCL fallback.
 
@@ -76,6 +73,7 @@ class SPD_Simulator(Simulator):
         riemann_solver_fv: str = "llf",
         slope_limiter: str = "minmod",
         ho_scheme_cls=None,
+        fb_scheme_cls=None,
         *args,
         **kwargs,
     ):
@@ -99,6 +97,7 @@ class SPD_Simulator(Simulator):
             min_rho=min_rho,
             max_rho=max_rho,
             min_P=min_P,
+            godunov=godunov,
             limiting_variables=limiting_variables,
         )
 
@@ -131,8 +130,10 @@ class SPD_Simulator(Simulator):
             raise ValueError(f"Invalid scheme: {scheme}")
 
         # Create Fallback scheme (MUSCL/MUSCL-Hancock)
+        if fb_scheme_cls is None:
+            fb_scheme_cls = FallbackScheme
         if "FB" in scheme:
-            self.lo_scheme = FallbackScheme(
+            self.lo_scheme = fb_scheme_cls(
                 self,
                 primary=self.ho_scheme,
                 riemann_solver=riemann_solver_fv,
@@ -268,8 +269,3 @@ class SPD_Simulator(Simulator):
         raise AttributeError(
             f"'{type(self).__name__}' object has no attribute '{name}'"
         )
-
-
-# Backward-compatible names used by tests and legacy scripts.
-SDFB_Simulator = SPD_Simulator
-SDADER_Simulator = SPD_Simulator
