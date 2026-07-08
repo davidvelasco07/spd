@@ -70,18 +70,18 @@ if CUPY_AVAILABLE:
         "sd_pad_k",
     )
 
-    # Neighbor-class offsets for the filter-based apply_blending path,
-    # replicating the slicing loops of the CPU implementation *exactly*.
-    # Note: the CPU 3D loops for the 0.5/0.375 classes are asymmetric
-    # (they cover only 6 of 12 edge-diagonals and 4 of 8 corners); those
-    # offsets were extracted from the CPU code's impulse response.
+    # Neighbor-class offsets for the filter-based apply_blending path:
+    # 0.5 for the edge-diagonal (second) neighbors and 0.375 for the corner
+    # (third) neighbors, matching the symmetric CPU slicing loops.
     _blending_offsets = {
         1: [],
         2: [(0.5, [(-1, -1), (-1, 1), (1, -1), (1, 1)])],
         3: [
-            (0.5, [(-1, -1, 0), (-1, 0, -1), (-1, 0, 1),
-                   (0, -1, -1), (0, 1, -1), (1, -1, 0)]),
-            (0.375, [(-1, -1, -1), (-1, -1, 1), (-1, 1, -1), (-1, 1, 1)]),
+            (0.5, [(sk, sj, si) for sk in (-1, 0, 1) for sj in (-1, 0, 1)
+                   for si in (-1, 0, 1)
+                   if (sk != 0) + (sj != 0) + (si != 0) == 2]),
+            (0.375, [(sk, sj, si) for sk in (-1, 1) for sj in (-1, 1)
+                     for si in (-1, 1)]),
         ],
     }
 
@@ -404,12 +404,12 @@ def apply_blending(self,trouble,theta):
         for i in range(len(cuts)):
             for idim in self.idims:
                 shape1 = tuple(np.roll(np.array((slice(None),)+cuts[ i]),-idim))
-                shape2 = tuple(np.roll(np.array((slice(None),)+cuts[::-1][-i]),-idim))
+                shape2 = tuple(np.roll(np.array((slice(None),)+cuts[::-1][i]),-idim))
                 theta[shape1] = np.maximum(.5*trouble[shape2],theta[shape1])
         #Third neighbors
         cuts1 = [(x,y,z) for x in (a,b) for y in (a,b) for z in (a,b)]
         cuts2 = [(x,y,z) for x in (b,a) for y in (b,a) for z in (b,a)]
-        for i in range(len(cuts)):
+        for i in range(len(cuts1)):
             theta[cuts1[i]] = np.maximum(.375*trouble[cuts2[i]],theta[cuts1[i]])
     
     #Last layer
