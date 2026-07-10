@@ -40,6 +40,8 @@ if CUPY_AVAILABLE:
     # Fused NAD check: tolerance-relaxed DMP bounds, bound violation test,
     # and the smooth-extrema relaxation in a single kernel (replaces the
     # ~8 elementwise kernels of the where/arithmetic chain).
+    # The conditions are phrased so NaN candidates are flagged as troubled
+    # (comparisons with NaN are false), never silently admitted.
     nad_k = cp.ElementwiseKernel(
         "T W, T Wmin, T Wmax, T alpha, float64 tol, bool delta_mode, bool use_sed",
         "T out",
@@ -53,19 +55,19 @@ if CUPY_AVAILABLE:
             lo = Wmin - fabs(Wmin) * tol;
             hi = Wmax + fabs(Wmax) * tol;
         }
-        out = (W < lo || W > hi) ? (T)1 : (T)0;
+        out = (W >= lo && W <= hi) ? (T)0 : (T)1;
         if (use_sed && alpha >= 1) out = 0;
         """,
         "sd_nad_k",
     )
 
-    # Fused PAD check: flag non-physical density/pressure on top of the
-    # existing trouble markers (in place).
+    # Fused PAD check: flag non-physical (or NaN) density/pressure on top
+    # of the existing trouble markers (in place).
     pad_k = cp.ElementwiseKernel(
         "T tr, T rho, T p, float64 min_rho, float64 max_rho, float64 min_P",
         "T out",
         """
-        out = (rho < min_rho || rho > max_rho || p < min_P) ? (T)1 : tr;
+        out = (rho >= min_rho && rho <= max_rho && p >= min_P) ? tr : (T)1;
         """,
         "sd_pad_k",
     )
@@ -175,10 +177,10 @@ def nad_check(W_new, W_min, W_max, alpha, tolerance, delta_mode):
     else:
         W_min = W_min - np.abs(W_min) * tolerance
         W_max = W_max + np.abs(W_max) * tolerance
-    trouble = np.where(W_new >= W_min, 0, 1)
-    trouble = np.where(W_new <= W_max, trouble, 1)
+    # Phrased so NaN candidates are flagged (NaN comparisons are false).
+    trouble = np.where((W_new >= W_min) & (W_new <= W_max), 0, 1)
     if alpha is not None:
-        trouble *= np.where(alpha < 1, 1, 0)
+        trouble *= np.where(alpha >= 1, 0, 1)
     return trouble
 
 
@@ -191,9 +193,10 @@ def pad_check(troubles, rho, P, min_rho, max_rho, min_P):
     if is_gpu_array(troubles):
         pad_k(troubles, rho, P, min_rho, max_rho, min_P, troubles)
         return troubles
-    troubles = np.where(rho >= min_rho, troubles, 1)
-    troubles = np.where(rho <= max_rho, troubles, 1)
-    return np.where(P >= min_P, troubles, 1)
+    # Phrased so NaN density/pressure is flagged (NaN comparisons are false).
+    return np.where(
+        (rho >= min_rho) & (rho <= max_rho) & (P >= min_P), troubles, 1
+    )
 
 
 def detect_troubles(self: Simulator):

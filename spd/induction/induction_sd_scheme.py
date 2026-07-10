@@ -362,10 +362,15 @@ class InductionSD_Scheme(SD_Scheme):
             B2 = self.compute_fp_from_sp(B2[na], dim1)[0]
             E_ep = self.array_fp(dims=dim1 + dim2, nvar=self._E_NVAR)
             self.fill_E_array(E_ep, B1, B2, dim)
+            # E_cut's axis bookkeeping assumes an ADER node axis after nvar;
+            # the BC arrays only carry that axis in ADER mode (matching
+            # _array_BC_induction), so squeeze it back out for RK.
+            ad = self._edges_use_ader()
             for d2 in self.other_dims(dim):
                 BC = self.dm.__getattribute__(f"BC_E{dim}_ep_{d2}")
-                BC[0][...] = self.E_cut(E_ep[:, np.newaxis], 0, d2, d2)
-                BC[1][...] = self.E_cut(E_ep[:, np.newaxis], -1, d2, d2)
+                for side, idx in ((0, 0), (1, -1)):
+                    cutE = self.E_cut(E_ep[:, np.newaxis], idx, d2, d2)
+                    BC[side][...] = cutE if ad else cutE[:, 0]
 
     def E_cut(self, E, index, dim1, dim2):
         return E[indices(index, self.ndim + self.dims[dim2])][
@@ -506,6 +511,12 @@ class MHDInductionSD_Scheme(InductionSD_Scheme):
         E_ep[7] = p
 
     def E_riemann_solver(self, EL, ER, _v1_):
+        if self.riemann_solver_name == "hlld":
+            from spd.MHD.riemann_solver import hlld_E
+
+            return hlld_E(
+                EL, ER, _v1_, gamma=self._sim.gamma, min_c2=self._sim.min_c2
+            )
         return self.llf_E(EL, ER, _v1_, gamma=self._sim.gamma, min_c2=self._sim.min_c2)
 
     def llf_E(self, E_L, E_R, vel, *args, **kwargs):
@@ -525,10 +536,13 @@ class MHDInductionSD_Scheme(InductionSD_Scheme):
         )
         Ss = np.maximum(np.abs(E_R[vel]), np.abs(E_L[vel])) + np.maximum(c_R, c_L)
 
+        # Dissipation acts on the transverse field that is discontinuous
+        # across the sweep's interfaces: B2 for the dim1 sweep (vel = 3,
+        # induction flux +E), B1 for the dim2 sweep (vel = 4, flux -E).
         if vel == 3:
             Es = 0.5 * (E_R + E_L) - 0.5 * Ss * (B2_R - B2_L)
         elif vel == 4:
-            Es = 0.5 * (E_R + E_L) + 0.5 * Ss * (B2_R - B2_L)
+            Es = 0.5 * (E_R + E_L) + 0.5 * Ss * (B1_R - B1_L)
         else:
             Es = 0.5 * (E_R + E_L)
         return Es

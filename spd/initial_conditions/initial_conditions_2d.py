@@ -96,14 +96,19 @@ def sine_wave(xy: np.ndarray,case: int, A=0.125, vx=1, vy=1, P=1):
         return np.zeros(x.shape)
 
 def orszag_tang(xy: np.ndarray, case: int, gamma=5.0 / 3.0):
-    """Orszag-Tang vortex (ideal MHD) on the unit square, periodic BCs.
+    """Orszag-Tang vortex (ideal MHD), periodic BCs, domain [-1/2, 1/2]^2.
 
     Variable order: rho, vx, vy, vz, P, Bx, By, Bz.  The cell-centered B
     returned here is only an initial guess; the divergence-free staggered
     field must come from :func:`orszag_tang_Az` via the vector potential.
+
+    The canonical setup is defined on [0, 1]^2; the half-box coordinate
+    shift below maps it onto the centered domain so the central current
+    sheet (and the plasmoid it may spawn) sits at the origin, matching the
+    standard figures in the literature.
     """
-    x = xy[0]
-    y = xy[1]
+    x = xy[0] + 0.5
+    y = xy[1] + 0.5
     # Code units (magnetic pressure B^2/2): the canonical pairing is
     # rho = gamma^2, p = gamma, B0 = 1 (equivalent to the Gaussian-units
     # setup rho = 25/36pi, p = 5/12pi, B0 = 1/sqrt(4pi)).
@@ -126,9 +131,10 @@ def orszag_tang(xy: np.ndarray, case: int, gamma=5.0 / 3.0):
 
 def orszag_tang_Az(mesh: np.ndarray, j: int):
     """z-component of the vector potential for the Orszag-Tang field:
-    Bx = dAz/dy, By = -dAz/dx."""
-    x = mesh[0]
-    y = mesh[1]
+    Bx = dAz/dy, By = -dAz/dx.  Same half-box shift as :func:`orszag_tang`
+    (centered domain [-1/2, 1/2]^2)."""
+    x = mesh[0] + 0.5
+    y = mesh[1] + 0.5
     B0 = 1.0
     if j == 2:
         return B0 * (

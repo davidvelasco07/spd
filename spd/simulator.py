@@ -58,6 +58,7 @@ class Simulator:
         chi: float = 1e-4,
         cfl_coeff: float = 0.4,
         min_c2: float = 1e-10,
+        min_rho: float = 1e-10,
         viscosity: bool = False,
         thdiffusion: bool = False,
         potential: bool = False,
@@ -124,6 +125,7 @@ class Simulator:
         self.chi = chi
         self.cfl_coeff = cfl_coeff
         self.min_c2 = min_c2
+        self.min_rho = min_rho
         self.viscosity = viscosity
         self.thdiffusion = thdiffusion
         self.passives = passives
@@ -216,6 +218,7 @@ class Simulator:
         from .integrators.ader import ADER_Integrator
         from .integrators.rk import RK_Integrator
         from .integrators.rk_induction import InductionRKIntegrator
+        from .integrators.rk_mhd import MHDRKIntegrator
 
         integrator_key = (self.time_integrator or "ader").lower()
         if integrator_key == "ader":
@@ -228,6 +231,8 @@ class Simulator:
             assert self.m <= 5, "RK implementation only supports up to 5th order"
             if self.soe == "induction":
                 self.integrator = InductionRKIntegrator(m=self.m, ndim=self.ndim)
+            elif self.soe == "mhd":
+                self.integrator = MHDRKIntegrator(m=self.m, ndim=self.ndim)
             else:
                 self.integrator = RK_Integrator(m=self.m, ndim=self.ndim)
             self.ader = False
@@ -302,6 +307,10 @@ class Simulator:
         self.scheme.post_init()
 
     def compute_primitives(self, U, **kwargs) -> np.ndarray:
+        if self.soe == "mhd":
+            # RAMSES-style ctoprim floors (primitive view only; U untouched).
+            kwargs.setdefault("min_rho", self.min_rho)
+            kwargs.setdefault("min_c2", self.min_c2)
         return self.equations.compute_primitives(
             U,
             self.vels,

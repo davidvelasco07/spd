@@ -17,11 +17,10 @@ same running subcell state as the low-order fluxes -- never from the
 lattice, so div(B) = 0 is preserved to machine precision.
 """
 
-import numpy as np
-
 from spd.fallback import FallbackScheme
 from spd.fallback.induction_fallback import InductionFallbackScheme
 from spd.induction.induction_sd_scheme import InductionSD_Scheme
+from .mhd_fv_scheme import MHD_FV_Scheme
 
 
 class MHDFallbackScheme(FallbackScheme, InductionFallbackScheme):
@@ -44,6 +43,10 @@ class MHDFallbackScheme(FallbackScheme, InductionFallbackScheme):
         self._E_levels = {}
         self._B_cand = None
         self._with_ct = False
+
+    # MUSCL-Hancock half-step prediction with the MHD source terms, borrowed
+    # from the MHD FV scheme (both operate on the same ghosted FV layout).
+    compute_prediction = MHD_FV_Scheme.compute_prediction
 
     def _has_ct_edges(self):
         """True when at least one edge E-family has both transverse
@@ -156,10 +159,68 @@ class MHDFallbackScheme(FallbackScheme, InductionFallbackScheme):
             # Degenerate CT (e.g. 1D): plain high-order update of B.
             InductionSD_Scheme.ader_update(prim)
         self.switch_to_high_order()
+        # B_to_U also refreshes the cell-averaged B rows (they drive the
+        # next step's CFL condition and trouble detection).
         prim.B_to_U()
-        # Keep the cell-averaged B rows consistent with the CT face field
-        # (they drive the next step's CFL condition and trouble detection).
-        sim = self._sim
-        b_rows = [sim.b[dim] for dim in self.dims]
-        pdm = prim.dm
-        pdm.U_cv[b_rows] = prim.compute_cv_from_sp(pdm.U_sp[b_rows])
+
+    # ----------------------------------------------------------------
+    # Runge-Kutta (method-of-lines) interface
+    # ----------------------------------------------------------------
+
+    def compute_update(self, U, ader=False, prims=False, **kwargs):
+        """Corrected stage RHS for U and (stored for ``compute_B_update``)
+        for the face B field.
+
+        Mirrors ``FallbackScheme.compute_update`` with the CT coupling of
+        ``ader_update``: the stage's high-order edge E is cascade level 0,
+        the MOOD hooks build the MUSCL / first-order corner-E levels from
+        the same ghosted subcell states as the low-order fluxes, and the
+        detection tests the full candidate (hydro U_new with the candidate
+        CT B rows).  The final assemblies give both RHS families.
+        """
+        if self.primary is None:
+            return super().compute_update(U, ader=ader, prims=prims, **kwargs)
+        prim = self.primary
+        prim.solve_faces(U, ader=ader, prims=prims)
+        # Edge E of the same stage (set_stage_state refreshed W_sp/B_fp).
+        prim.solve_edges(0)
+        if self.viscosity and self.nu > 0:
+            InductionSD_Scheme.add_nabla_terms(prim)
+        self._with_ct = self._has_ct_edges() and self.use_mood
+        E_hi = {
+            dim: prim.E_ader_ep[dim][0]
+            for dim in self.Edims
+            if all(d in self.dims for d in prim.other_dims(dim))
+        }
+        if self._with_ct:
+            self._E_levels = {0: E_hi}
+
+        prim.switch_to_finite_volume(U_sp=U)
+        self.store_high_order_fluxes(0, ader=ader)
+        self.compute_corrected_fluxes(self.dt)
+        dUdt_fv = self.compute_dudt(self.U_cv)
+        dUdt_sp = prim.compute_sp_from_cv_fv(dUdt_fv)
+
+        if self._with_ct:
+            # Face-B RHS from the final (post-revision) edge-E assembly.
+            E_fin = self.mood_edge_E(self._E_levels, self.dm.cascade)
+            self._K_B = self.ct_dB(E_fin, 1.0)
+            self._B_cand = None
+            self._E_levels = {}
+        elif self._has_ct_edges():
+            # Godunov / theta-blending path (consistent with correct_fluxes).
+            E_lo = self.compute_low_order_E(self.dm.M, muscl=True)
+            theta = 1.0 if self.godunov else self.dm.theta
+            self._K_B = self.ct_dB(
+                self.blended_edge_E(E_hi, E_lo, theta), 1.0
+            )
+        else:
+            # Degenerate CT (e.g. 1D): plain high-order edge E.
+            self._K_B = {dim: prim.dBdt_dim(dim) for dim in self.dims}
+
+        prim.switch_to_high_order(update_solution_points=False)
+        return dUdt_sp
+
+    def compute_B_update(self):
+        """Face-B RHS of the stage prepared by ``compute_update``."""
+        return self._K_B

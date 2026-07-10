@@ -1,17 +1,26 @@
 import numpy as np
 from spd import hydro
 
-def compute_fast_vel(p,rho,Bn,Bt1,Bt2,gamma,min_c2):
+def compute_fast_vel(p,rho,Bn,Bt1,Bt2,gamma,min_c2,min_rho=1e-10):
+    """Fast magnetosonic speed with RAMSES-style safety floors: density is
+    floored (smallr), the sound speed uses the hydro min_c2 floor (which
+    also covers negative pressure), and the discriminant is clamped at 0
+    (it is >= 0 analytically but roundoff can push it below).  The result
+    is therefore finite and >= sqrt(min_c2) for any input state."""
+    rho = np.where(rho > min_rho, rho, min_rho)
     B2 = Bn**2+Bt1**2+Bt2**2
     c2 = hydro.compute_cs2(p,rho,gamma,min_c2)
     d2 = 0.5*(B2/rho+c2)
-    return np.sqrt(d2 + np.sqrt(d2**2-c2*Bn**2/rho))
+    disc = d2**2-c2*Bn**2/rho
+    return np.sqrt(d2 + np.sqrt(np.where(disc > 0, disc, 0)))
 
 def compute_primitives(
         U: np.ndarray,
         vels: np.array,
         _p_: int,
         gamma: float,
+        min_rho=None,
+        min_c2=None,
         **kwargs)->np.ndarray:
     """
     Transforms array of conservative to primitive variables
@@ -25,7 +34,15 @@ def compute_primitives(
             number of dimensions
     _p_:    index of pressure/energy in the Solution array
     gamma:  Adiabatic index
-    
+    min_rho, min_c2: RAMSES-style ctoprim floors (smallr, smallc**2).  When
+            given, the primitive density is floored at min_rho and the
+            pressure at smallp = min_rho*min_c2/gamma.  Only the primitive
+            view is floored -- the conservative state U is never modified,
+            so a cell whose total energy implies negative internal energy
+            keeps its conserved energy but feeds an admissible pressure to
+            the reconstruction/Riemann/wave-speed machinery (matching
+            RAMSES's ctoprim).
+
     Returns
     -------
     W: Solution array of primitive variables
@@ -38,6 +55,14 @@ def compute_primitives(
         # only fills the core fields when an output array W is supplied).
         W[vel+shift] = U[vel+shift]
         W[_p_] -= (gamma-1)*0.5*W[vel+shift]**2
+    if min_rho is not None:
+        _d_ = kwargs.get("_d_", 0)
+        rho = W[_d_]
+        W[_d_] = np.where(rho > min_rho, rho, min_rho)
+        if min_c2 is not None:
+            smallp = min_rho * min_c2 / gamma
+            p = W[_p_]
+            W[_p_] = np.where(p > smallp, p, smallp)
     return W
                 
 def compute_conservatives(

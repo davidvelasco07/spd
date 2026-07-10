@@ -29,8 +29,10 @@ class Riemann_solver_1D:
             else:
                 U_L = M_L
                 U_R = M_R
-                W_L = self.equations.compute_primitives(U_L,vels,_p_,gamma,**kwargs)
-                W_R = self.equations.compute_primitives(U_R,vels,_p_,gamma,**kwargs)
+                # min_c2 is forwarded so the MHD conversion can apply its
+                # ctoprim-style floors (hydro absorbs it in **kwargs).
+                W_L = self.equations.compute_primitives(U_L,vels,_p_,gamma,min_c2=min_c2,**kwargs)
+                W_R = self.equations.compute_primitives(U_R,vels,_p_,gamma,min_c2=min_c2,**kwargs)
             return solver(W_L,W_R,U_L,U_R,F,vels,_p_,gamma,min_c2,**kwargs)
         return solve
 
@@ -49,7 +51,12 @@ class Riemann_solver_1D:
         if self.soe == "hydro":
             return rs.hllc(*args,**kwargs)
         elif self.soe == "mhd":
-            raise NotImplementedError("HLLC is not implemented for MHD; use llf")
+            raise NotImplementedError("HLLC is not implemented for MHD; use llf or hlld")
+
+    def hlld(self,*args,**kwargs):
+        if self.soe == "mhd":
+            return mrs.hlld(*args,**kwargs)
+        raise NotImplementedError("HLLD is an MHD solver; use hllc for hydro")
 
     def lhllc(self,*args,**kwargs):
         return rs.lhllc(*args,**kwargs)

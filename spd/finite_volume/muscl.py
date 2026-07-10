@@ -69,6 +69,24 @@ if CUPY_AVAILABLE:
         return _muscl_face_kernels[limiter]
 
 
+def enforce_face_positivity(self, dim: str, idim: int) -> None:
+    """RAMSES-style positivity guard on the reconstructed face states:
+    where the reconstructed density or pressure falls at/below its floor,
+    that variable reverts to the donor-cell (cell-centered) value.  The
+    face states are primitives, so only the density and pressure rows are
+    touched (the reconstruction of the other variables stays intact)."""
+    ngh = self.Nghc
+    crop = lambda start, end: crop_fv(start, end, idim, self.ndim, ngh)
+    M = self.dm.M
+    min_rho = getattr(self, "min_rho", 1e-10)
+    min_P = getattr(self, "min_P", 1e-10)
+    for var, floor in ((self._d_, min_rho), (self._p_, min_P)):
+        ML = self.ML_fp[dim][var]
+        MR = self.MR_fp[dim][var]
+        ML[...] = np.where(ML > floor, ML, M[crop(1, -2)][var])
+        MR[...] = np.where(MR > floor, MR, M[crop(2, -1)][var])
+
+
 def reconstruct_faces(self, dim: str, idim: int) -> None:
     """Fill ML_fp/MR_fp for *dim* with the MUSCL reconstruction (dispatcher).
 
@@ -78,10 +96,12 @@ def reconstruct_faces(self, dim: str, idim: int) -> None:
     (only defined under CUPY_AVAILABLE) is never referenced in that case.
     """
     if is_gpu_array(self.dm.M) and self.slope_limiter.limiter in _LIMITER_DEVICE:
-        return reconstruct_faces_gpu(self, dim, idim)
-    S = self.compute_slopes(self.dm.M, idim)
-    self.MR_fp[dim][...] = self.interpolate_R(self.dm.M, S, idim)
-    self.ML_fp[dim][...] = self.interpolate_L(self.dm.M, S, idim)
+        reconstruct_faces_gpu(self, dim, idim)
+    else:
+        S = self.compute_slopes(self.dm.M, idim)
+        self.MR_fp[dim][...] = self.interpolate_R(self.dm.M, S, idim)
+        self.ML_fp[dim][...] = self.interpolate_L(self.dm.M, S, idim)
+    enforce_face_positivity(self, dim, idim)
 
 
 def reconstruct_faces_gpu(self, dim: str, idim: int) -> None:
@@ -271,6 +291,58 @@ def compute_prediction(W: np.ndarray,
             dtW[_d_] -= (W[vel]*dW[_d_]) 
             dtW[_p_] -= (W[vel]*dW[_p_])
 
+def compute_prediction_mhd(W: np.ndarray,
+                           dWs: np.ndarray,
+                           dtW: np.ndarray,
+                           vels: np.array,
+                           ndim: int,
+                           gamma: float,
+                           _d_: int,
+                           _p_: int,
+                           b: list,
+                           WB: bool,
+                           npassive: int = 0,
+                           )->None:
+    """
+    Hancock half-step prediction (dW/dt) for ideal MHD in primitive
+    variables, following the RAMSES trace2d/trace3d source terms
+    (mhd/umuscl.f90).  Per sweep direction n with velocity v_n and normal
+    field B_n (t are the two transverse components):
+
+        drho/dt -= v_n drho + rho dv_n
+        dp/dt   -= v_n dp   + gamma p dv_n
+        dv_n/dt -= v_n dv_n + (dp + sum_t B_t dB_t)/rho
+        dv_t/dt -= v_n dv_t - B_n dB_t / rho          (magnetic tension)
+        dB_t/dt -= v_n dB_t + B_t dv_n - B_n dv_t     (induction)
+
+    The B_n dB_n pressure/tension pair cancels in the normal momentum
+    equation, and B_n has no source from its own sweep (it is constant in
+    the 1D subsystem); the v(div B) terms are dropped as in RAMSES.
+
+    Parameters
+    ----------
+        b:  indices of the magnetic field components [Bx, By, Bz] in W.
+    """
+    dtW[...] = 0
+    rho = W[_d_]
+    for idim in range(ndim):
+        vel = vels[idim]
+        bn = b[idim]
+        dW = dWs[idim]
+        others = [k for k in range(3) if k != idim]
+        dtW[_d_] -= W[vel]*dW[_d_] + rho*dW[vel]
+        dtW[_p_] -= W[vel]*dW[_p_] + gamma*W[_p_]*dW[vel]
+        dptot = dW[_p_] + sum(W[b[k]]*dW[b[k]] for k in others)
+        dtW[vel] -= W[vel]*dW[vel] + dptot/rho
+        for k in others:
+            vt = vels[k]
+            bt = b[k]
+            dtW[vt] -= W[vel]*dW[vt] - W[bn]*dW[bt]/rho
+            dtW[bt] -= W[vel]*dW[bt] + W[bt]*dW[vel] - W[bn]*dW[vt]
+        if npassive > 0:
+            _ps_ = _p_+1
+            dtW[_ps_:_ps_+npassive] -= W[vel]*dW[_ps_:_ps_+npassive]
+
 def MUSCL_Hancock_fluxes(self: Simulator,
                          F: dict,
                          dt: float,
@@ -320,5 +392,6 @@ def MUSCL_Hancock_fluxes(self: Simulator,
         idim=self.dims[dim]
         self.MR_fp[dim][...] = self.interpolate_R(self.dm.M,S[idim],idim)
         self.ML_fp[dim][...] = self.interpolate_L(self.dm.M,S[idim],idim)
+        enforce_face_positivity(self, dim, idim)
         self.solve_riemann_problem(dim,F[dim],prims)
 

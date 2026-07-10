@@ -73,6 +73,7 @@ class HydroSimulator(Simulator):
         riemann_solver_fv: str = "llf",
         slope_limiter: str = "minmod",
         ho_scheme_cls=None,
+        fv_scheme_cls=None,
         fb_scheme_cls=None,
         *args,
         **kwargs,
@@ -124,7 +125,14 @@ class HydroSimulator(Simulator):
             for dim in self.dims:
                 self.n[dim] = 1
                 setattr(self, f"n{dim}", 1)
-            self.ho_scheme = FV_Scheme(self, riemann_solver=riemann_solver_fv)
+            if fv_scheme_cls is None:
+                fv_scheme_cls = FV_Scheme
+            self.ho_scheme = fv_scheme_cls(
+                self,
+                riemann_solver=riemann_solver_fv,
+                slope_limiter=slope_limiter,
+                scheme=fallback,
+            )
             self.cfl_coeff /= self.p + 1
         else:
             raise ValueError(f"Invalid scheme: {scheme}")

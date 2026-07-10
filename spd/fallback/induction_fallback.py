@@ -85,25 +85,28 @@ class InductionFallbackScheme:
 
     def compute_low_order_E(self, W_gh, muscl=True):
         """
-        Four-state LLF-CT electric field at the primary's edge points from
-        the ghosted subcell primitives ``W_gh``.
+        Four-state CT electric field at the primary's edge points from the
+        ghosted subcell primitives ``W_gh``.
 
         With ``muscl=True`` (cascade level 1) the four corner states are
         MUSCL reconstructions of the adjacent subcells (limited half-slopes
         along both transverse directions, same limiter as the hydro
         fallback); with ``muscl=False`` (terminal level, first order) the
-        subcell values are used unreconstructed.  For E-family ``dim`` with
-        transverse directions (dim1, dim2), using the code convention
-        E = v1*B2 - v2*B1:
+        subcell values are used unreconstructed.
 
-            E_lo = 1/4 sum_s E_s - S1/2 <dB2>_1 + S2/2 <dB1>_2
-
-        with the averaged tangential-field jumps across each transverse
-        direction and S = max_s(|v| + c_fast) the local LLF speed bound.
+        The corner states are resolved by
+        :func:`spd.MHD.mhd_fv_scheme.four_state_E` (borrowed from the MHD FV
+        scheme, which uses the same construction for its edge E-field):
+        a four-state LLF bound with fast magnetosonic speeds, or two
+        successive one-dimensional HLLD sweeps (dim1 then dim2) when the
+        fallback's Riemann solver is HLLD.
         """
+        from spd.MHD.mhd_fv_scheme import four_state_E
+
         sim = self._sim
         min_rho = getattr(self, "min_rho", 1e-12)
         min_P = getattr(self, "min_P", 1e-12)
+        use_hlld = getattr(self, "riemann_solver_name", "llf") == "hlld"
         E_lo = {}
         for dim in self.Edims:
             dim1, dim2 = self.primary.other_dims(dim)
@@ -120,42 +123,41 @@ class InductionFallbackScheme:
                 S2[cut(1, -1, i2)] = self.compute_slopes(W_gh, i2)
             r_v1 = sim.vels[i1]
             r_v2 = sim.vels[i2]
-            rows = [r_v1, r_v2, sim.b[dim1], sim.b[dim2], sim.b[dim],
-                    sim._d_, sim._p_]
-            E_sum = 0.0
-            Sp1 = Sp2 = None
-            dB2_1 = 0.0
-            dB1_2 = 0.0
-            for o1 in (-1, 0):
-                for o2 in (-1, 0):
-                    off = {dim1: o1, dim2: o2}
-                    # The edge point is the corner of the subcell on the
-                    # opposite side of each offset: reconstruct towards it.
-                    sgn1 = 1.0 if o1 == -1 else -1.0
-                    sgn2 = 1.0 if o2 == -1 else -1.0
-                    g = lambda var: (
-                        self._edge_gather(W_gh, var, idx, off)
-                        + sgn1 * self._edge_gather(S1, var, idx, off)
-                        + sgn2 * self._edge_gather(S2, var, idx, off)
-                    )
-                    v1, v2 = g(r_v1), g(r_v2)
-                    B1, B2, B3 = g(sim.b[dim1]), g(sim.b[dim2]), g(sim.b[dim])
-                    rho = np.maximum(g(sim._d_), min_rho)
-                    p = np.maximum(g(sim._p_), min_P)
-                    E_sum = E_sum + (v1 * B2 - v2 * B1)
-                    # Fastest magnetosonic bound: sqrt(a^2 + B^2/rho).
-                    c = np.sqrt(
-                        (self.gamma * p + B1 * B1 + B2 * B2 + B3 * B3) / rho
-                    )
-                    s1 = np.abs(v1) + c
-                    s2 = np.abs(v2) + c
-                    Sp1 = s1 if Sp1 is None else np.maximum(Sp1, s1)
-                    Sp2 = s2 if Sp2 is None else np.maximum(Sp2, s2)
-                    jsgn1 = 1.0 if o1 == 0 else -1.0
-                    jsgn2 = 1.0 if o2 == 0 else -1.0
-                    dB2_1 = dB2_1 + 0.5 * jsgn1 * B2
-                    dB1_2 = dB1_2 + 0.5 * jsgn2 * B1
-            E_lo[dim] = 0.25 * E_sum - 0.5 * Sp1 * dB2_1 + 0.5 * Sp2 * dB1_2
+
+            def corner(o1, o2):
+                """(v1, v2, B1, B2, B3, rho, p) reconstructed towards the
+                edge point from the subcell at offsets (o1, o2)."""
+                off = {dim1: o1, dim2: o2}
+                # The edge point is the corner of the subcell on the
+                # opposite side of each offset: reconstruct towards it.
+                sgn1 = 1.0 if o1 == -1 else -1.0
+                sgn2 = 1.0 if o2 == -1 else -1.0
+                g = lambda var: (
+                    self._edge_gather(W_gh, var, idx, off)
+                    + sgn1 * self._edge_gather(S1, var, idx, off)
+                    + sgn2 * self._edge_gather(S2, var, idx, off)
+                )
+                # Positivity guard (RAMSES-style): where the reconstructed
+                # density/pressure is at/below its floor, revert that
+                # variable to the donor-cell (unreconstructed) value.
+                def g_pos(var, floor):
+                    rec = g(var)
+                    dc = self._edge_gather(W_gh, var, idx, off)
+                    return np.where(rec > floor, rec, dc)
+                return (
+                    g(r_v1), g(r_v2),
+                    g(sim.b[dim1]), g(sim.b[dim2]), g(sim.b[dim]),
+                    g_pos(sim._d_, min_rho),
+                    g_pos(sim._p_, min_P),
+                )
+
+            E_lo[dim] = four_state_E(
+                corner,
+                self.gamma,
+                sim.min_c2,
+                use_hlld=use_hlld,
+                xp=self.dm.xp,
+            )
         return E_lo
 
     # ----------------------------------------------------------------
@@ -227,18 +229,15 @@ class InductionFallbackScheme:
             E[dim] = e
         return E
 
-    def blended_ct_node_update(self, E_hi, E_lo, dt_i, theta_gh):
+    def blended_edge_E(self, E_hi, E_lo, theta_gh):
         """
-        Node-level CT update of the face B fields from the theta-blended
-        edge E-field:
+        Theta-blended edge E-field:  E = (1 - theta_e) * E_hi + theta_e * E_lo
 
-            E = (1 - theta_e) * E_hi + theta_e * E_lo
-            B -= dt_i * curl(E)
-
-        ``theta_gh`` is the ghosted FV trouble indicator of this time node
-        (``dm.theta``-like, leading singleton variable axis) or a scalar
-        (godunov mode).  The blended E is single-valued on the edge lattice,
-        so div(B) is preserved to machine precision.
+        ``theta_gh`` is the ghosted FV trouble indicator (``dm.theta``-like,
+        leading singleton variable axis) or a scalar (godunov mode).  The
+        endpoints select exactly so a non-finite E on the fully discarded
+        side (e.g. HLLD fed inadmissible predictor states) does not poison
+        the blend.
         """
         E_blend = {}
         for dim, E_l in E_lo.items():
@@ -246,7 +245,27 @@ class InductionFallbackScheme:
                 th = theta_gh
             else:
                 th = self.edge_theta(dim, theta_gh)
-            E_blend[dim] = E_hi[dim] + th * (E_l - E_hi[dim])
+            if np.isscalar(th) and th >= 1:
+                E_blend[dim] = E_l
+            elif np.isscalar(th) and th <= 0:
+                E_blend[dim] = E_hi[dim]
+            else:
+                E_blend[dim] = np.where(
+                    th >= 1,
+                    E_l,
+                    np.where(th <= 0, E_hi[dim],
+                             E_hi[dim] + th * (E_l - E_hi[dim])),
+                )
+        return E_blend
+
+    def blended_ct_node_update(self, E_hi, E_lo, dt_i, theta_gh):
+        """
+        Node-level CT update of the face B fields from the theta-blended
+        edge E-field:  B -= dt_i * curl(E_blend).  The blended E is
+        single-valued on the edge lattice, so div(B) is preserved to
+        machine precision.
+        """
+        E_blend = self.blended_edge_E(E_hi, E_lo, theta_gh)
         dB = self.ct_dB(E_blend, dt_i)
         for dim in self.dims:
             self.primary.B_fp[dim] -= dB[dim]

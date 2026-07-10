@@ -63,13 +63,17 @@ class MHD_SD_Scheme(MHDInductionSD_Scheme):
 
     def B_to_U(self):
         """Overwrite the cell-centered B rows of ``U_sp`` with the projection
-        of the (divergence-free) face-staggered CT field."""
+        of the (divergence-free) face-staggered CT field, and refresh the
+        corresponding cell averages of ``U_cv`` (they drive the next step's
+        CFL condition and trouble detection)."""
         sim = self._sim
+        b_rows = [sim.b[dim] for dim in self.dims]
         for dim in self.dims:
             B = self.dm.__getattribute__(f"B{dim}_fp")
             self.dm.U_sp[sim.b[dim]] = self.compute_sp_from_fp(
                 B[np.newaxis], dim=dim
             )[0]
+        self.dm.U_cv[b_rows] = self.compute_cv_from_sp(self.dm.U_sp[b_rows])
 
     def ader_predictor(self, prims: bool = False) -> None:
         """Coupled Picard iteration for the fluid state and the face B field."""
@@ -111,3 +115,35 @@ class MHD_SD_Scheme(MHDInductionSD_Scheme):
         SemiDiscreteScheme.ader_update(self)
         InductionSD_Scheme.ader_update(self)
         self.B_to_U()
+
+    # ----------------------------------------------------------------
+    # Runge-Kutta (method-of-lines) interface
+    # ----------------------------------------------------------------
+
+    def set_stage_state(self, U_stage):
+        """Synchronize the internal state with an RK stage: the B rows of
+        ``U_stage`` are re-projected from the (divergence-free) stage face
+        field already written into ``B{dim}_fp``, and ``W_sp`` is refreshed
+        (the edge solver interpolates primitives from it)."""
+        sim = self._sim
+        na = np.newaxis
+        for dim in self.dims:
+            B = self.dm.__getattribute__(f"B{dim}_fp")
+            U_stage[sim.b[dim]] = self.compute_sp_from_fp(B[na], dim=dim)[0]
+        self.dm.W_sp[...] = self.compute_primitives(U_stage)
+
+    def compute_update(self, U, ader=False, prims=False, **kwargs):
+        """Stage RHS for U; under RK (ader=False) it also solves the edges
+        of the same stage and stores the face-B RHS (edge-E curl) for
+        ``compute_B_update``."""
+        dUdt = super().compute_update(U, ader=ader, prims=prims, **kwargs)
+        if not ader:
+            self.solve_edges(0)
+            if self.viscosity and self.nu > 0:
+                InductionSD_Scheme.add_nabla_terms(self)
+            self._K_B = {dim: self.dBdt_dim(dim) for dim in self.dims}
+        return dUdt
+
+    def compute_B_update(self):
+        """Face-B RHS of the stage prepared by ``compute_update``."""
+        return self._K_B

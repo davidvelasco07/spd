@@ -23,11 +23,13 @@ if CUPY_AVAILABLE:
     import cupy as cp
 
     # Fused convex flux blend: F = theta*FB + (1-theta)*F in one kernel
-    # (theta broadcasts over the variable axis).
+    # (theta broadcasts over the variable axis).  The endpoints select
+    # instead of blending so a non-finite flux on the discarded side (e.g.
+    # HLLD fed inadmissible predictor states) cannot poison the result.
     blend_k = cp.ElementwiseKernel(
         "T f, T fb, T theta",
         "T out",
-        "out = f + theta * (fb - f);",
+        "out = (theta >= 1) ? fb : ((theta <= 0) ? f : f + theta * (fb - f));",
         "fb_blend_k",
     )
 
@@ -36,11 +38,23 @@ def blend_fluxes(F, F_FB, theta):
     """Convex blend theta*F_FB + (1-theta)*F (dispatcher).
 
     Out of place, since F may be a view of the primary scheme's fluxes.
-    Scalar theta (godunov mode) takes the generic path.
+    Scalar theta (godunov mode) takes the generic path.  The endpoints
+    (theta = 0, 1) select the corresponding flux exactly, so a non-finite
+    value on the fully discarded side does not propagate.
     """
     if is_gpu_array(theta):
         return blend_k(F, F_FB, theta)
-    return theta * F_FB + (1 - theta) * F
+    if np.isscalar(theta):
+        if theta >= 1:
+            return F_FB.copy()
+        if theta <= 0:
+            return F.copy()
+        return theta * F_FB + (1 - theta) * F
+    return np.where(
+        theta >= 1,
+        F_FB,
+        np.where(theta <= 0, F, theta * F_FB + (1 - theta) * F),
+    )
 
 
 class FallbackScheme(FV_Scheme):

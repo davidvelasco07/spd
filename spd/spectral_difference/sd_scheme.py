@@ -66,6 +66,7 @@ class SD_Scheme(SemiDiscreteScheme):
         self.centers = {}
         self.h_fp = {}
         self.h_cv = {}
+        self.riemann_solver_name = riemann_solver
         self.riemann_solver = rs1d(riemann_solver, soe).solver
 
         # Lagrange matrices for interpolation between bases
@@ -522,6 +523,7 @@ class SD_Scheme(SemiDiscreteScheme):
                 npassive=self.npassive,
                 thdiffusion=self.thdiffusion,
                 _t_=self._t_,
+                min_rho=self.min_rho,
             )
             bc.apply_interfaces(self, F, self.F_fp[dim], dim)
             if self.WB:
