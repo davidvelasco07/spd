@@ -15,17 +15,20 @@ class InductionSimulator(Simulator):
     """
     Parameters
     ----------
-    scheme_fb : str
+    scheme : str
         ``"SD"``, ``"SDFB"``, ``"FV"``, or ``"FVFB"``. ``"FV*"`` uses
         :class:`induction.induction_fv_scheme.InductionFV_Scheme` (cell-centered
         primitives + face CT); ``"SD*"`` uses spectral-difference induction.
+    scheme_fb : str or None
+        Deprecated alias for ``scheme`` (kept for backward compatibility).
     Same hydro-style kwargs as :class:`Simulator` (``init_fct`` should
     return rho, v, p components for quadrature; ``vectorpot_fct`` for A).
     """
 
     def __init__(
         self,
-        scheme_fb: str = "SD",
+        scheme: str = "SD",
+        scheme_fb: str = None,
         FB: bool = None,
         tolerance: float = 0.05,
         blending: bool = True,
@@ -34,11 +37,13 @@ class InductionSimulator(Simulator):
         **kwargs,
     ):
         kwargs.setdefault("soe", "induction")
+        if scheme_fb is not None:
+            scheme = scheme_fb
         if FB is not None:
-            if FB and "FB" not in scheme_fb:
-                scheme_fb = scheme_fb + "FB"
-            elif not FB and "FB" in scheme_fb:
-                scheme_fb = scheme_fb.replace("FB", "")
+            if FB and "FB" not in scheme:
+                scheme = scheme + "FB"
+            elif not FB and "FB" in scheme:
+                scheme = scheme.replace("FB", "")
 
         init = kwargs.pop("init", True)
         # Pure induction tests default to inviscid B; FV CT has no nu-closure yet.
@@ -47,7 +52,7 @@ class InductionSimulator(Simulator):
         Simulator.__init__(self, init=False, *args, **kwargs)
         self.init = init
 
-        if scheme_fb.upper().startswith("FV"):
+        if scheme.upper().startswith("FV"):
             # Match :class:`finite_volume.fv_simulator.FV_Simulator`: the FV mesh has
             # one control volume per ``N[dim]``, not ``N[dim] * (p+1)`` SD subcells.
             for dim in self.dims:
@@ -59,7 +64,7 @@ class InductionSimulator(Simulator):
         else:
             self.ho_scheme = InductionSD_Scheme(self, riemann_solver="llf", soe="hydro")
 
-        if "FB" in scheme_fb:
+        if "FB" in scheme:
             self.scheme = InductionFallbackScheme(
                 self,
                 self.ho_scheme,
