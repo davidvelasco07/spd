@@ -1,7 +1,7 @@
 import os
 import sys
 
-sys.path.insert(0, os.path.abspath("../src"))
+sys.path.insert(0, os.path.abspath(".."))
 
 project = "spd"
 author = "spd developers"
@@ -24,3 +24,4 @@ napoleon_google_docstring = True
 napoleon_numpy_docstring = True
 
 html_theme = "alabaster"
+html_baseurl = "https://davidvelasco07.github.io/spd/"
