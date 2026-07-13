@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spd"
+version = "0.0.1"
+dependencies = [
+    "matplotlib",
+    "mpmath",
+    "numpy",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "cupy-cuda12x",
+    "cutensor-cu12",
+]
+
+[tool.setuptools.packages.find]
+include = ["spd*"]

@@ -1,9 +1,8 @@
 import pytest
-import sys
-sys.path.append("../src")
+
 import numpy as np
 
-import polynomials as poly
+from spd.numerics import polynomials as poly
 tolerance=1E-14
 
 @pytest.mark.parametrize("p" , range(8))
