@@ -7,6 +7,15 @@ spatial discretization (SD/FV), time integration (ADER/RK), and physics modules
 
 .. toctree::
    :maxdepth: 2
+   :caption: Tutorials
+
+   notebooks/Introduction
+   tutorials/hydro
+   tutorials/induction
+   tutorials/mhd
+
+.. toctree::
+   :maxdepth: 2
    :caption: Guides
 
    guides/architecture

@@ -74,10 +74,12 @@ unchanged.
 | `spd/runtime/` | GPU data management and communication helpers |
 | `spd/initial_conditions/` | Parametrised test-problem ICs |
 | `test/` | Pytest suite (creation, transforms, GPU smoke tests) |
-| `notebooks/Introduction.ipynb` | Tutorial notebook (tracked in git) |
+| `notebooks/Introduction.ipynb` | Tutorial notebook (tracked in git; embedded in docs) |
+| `docs/tutorials/` | Hydro, induction, and MHD tutorial pages (MyST) |
 
 See the architecture guide in the docs for extension points (new schemes,
-integrators, or equation sets).
+integrators, or equation sets). Regenerate the MyST tutorial pages after editing
+``notebooks/_build_tutorials.py`` with ``python notebooks/_build_tutorials.py --myst``.
 
 ## Tests
 
@@ -95,4 +97,9 @@ Pages:
 https://davidvelasco07.github.io/spd/
 
 The site covers the modular layout (simulator → scheme → integrator → physics),
-configuration options, and the Python API reference.
+configuration options, the Python API reference, and tutorials: the
+[Introduction notebook](https://davidvelasco07.github.io/spd/notebooks/Introduction.html)
+(with pre-rendered plots) plus MyST pages for
+[hydro](https://davidvelasco07.github.io/spd/tutorials/hydro.html),
+[induction](https://davidvelasco07.github.io/spd/tutorials/induction.html), and
+[MHD](https://davidvelasco07.github.io/spd/tutorials/mhd.html).

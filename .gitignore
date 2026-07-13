@@ -5,6 +5,7 @@
 **/.ipynb_checkpoints/
 .venv/
 docs/_build/
+docs/notebooks/
 test/core.*
 
 temp
@@ -12,6 +13,7 @@ jobs
 
 **/*.egg-info
 
-# notebooks: keep only Introduction.ipynb tracked
+# notebooks: keep Introduction + tutorial builder tracked
 notebooks/**
 !notebooks/Introduction.ipynb
+!notebooks/_build_tutorials.py
