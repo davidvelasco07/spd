@@ -103,4 +103,4 @@ configuration options, the Python API reference, and tutorials: the
 [hydro](https://davidvelasco07.github.io/spd/tutorials/hydro.html),
 [induction](https://davidvelasco07.github.io/spd/tutorials/induction.html), and
 [MHD](https://davidvelasco07.github.io/spd/tutorials/mhd.html). On those pages,
-click **Live Code** in the toolbar to run cells in the browser via Binder.
+click **Live Code** on the tutorial page to run cells in the browser via Binder.

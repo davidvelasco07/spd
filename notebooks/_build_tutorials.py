@@ -39,12 +39,11 @@ def build(path, cells, *, tag_first_code=None):
 
 
 LIVE_CODE_BANNER = """\
-```{admonition} Run this tutorial in your browser
-:class: tip
+```{thebe-button} Live Code
+```
 
-Click **Live Code** in the toolbar to connect a Binder kernel and execute the cells
-below. Binder runs CPU NumPy (no GPU); plots appear inline after each cell finishes.
-```"""
+Starts a Binder kernel (CPU NumPy; no GPU). When the kernel is ready, click **Run** on each
+code cell below. The first cell runs automatically to import `spd` and set up plotting."""
 
 
 def write_doc_notebook(name, cells, out_dir=DOCS_TUTORIALS):
