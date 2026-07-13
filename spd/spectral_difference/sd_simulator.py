@@ -36,8 +36,20 @@ class SD_Simulator(Simulator):
     ):
         Simulator.__init__(self, *args, **kwargs)
 
-        # Create the semi-discrete SD scheme
-        self.scheme = SD_Scheme(self, riemann_solver=riemann_solver, soe=self.soe)
+        # Create the semi-discrete SD scheme. Block-based runs (multi-block
+        # forests, static refinement, or dynamic AMR hooks) use the
+        # AMR-capable scheme whose arrays carry a meshblock axis.
+        if (self.forest.Nblocks > 1
+                or self.forest.max_level > 0
+                or self.adapt_interval is not None):
+            from .sd_amr_scheme import SD_AMR_Scheme
+            self.scheme = SD_AMR_Scheme(
+                self, riemann_solver=riemann_solver, soe=self.soe
+            )
+        else:
+            self.scheme = SD_Scheme(
+                self, riemann_solver=riemann_solver, soe=self.soe
+            )
 
         if self.init:
             self.scheme.initialize()

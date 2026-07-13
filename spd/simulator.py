@@ -74,6 +74,10 @@ class Simulator:
         Nb: Tuple = None,
         forest_refine=None,
         levels=None,
+        refine_fn=None,
+        derefine_fn=None,
+        adapt_interval: int = None,
+        amr_max_level: int = None,
         verbose=True,
         available_time=3600.0,
         init: bool = True,
@@ -223,6 +227,15 @@ class Simulator:
             forest_refine(self.forest)
             self.forest.enforce_2to1_balance()
 
+        # Dynamic AMR hooks. Can also be set/modified as plain attributes
+        # between steps. When ``adapt_interval`` is not None and at least one
+        # of refine_fn/derefine_fn is set, ``perform_update`` tags and adapts
+        # after every ``adapt_interval`` steps (block-based schemes only).
+        self.refine_fn = refine_fn
+        self.derefine_fn = derefine_fn
+        self.adapt_interval = adapt_interval
+        self.amr_max_level = amr_max_level
+
         self.select_integrator(time_integrator)
 
         self.noutput = 0
@@ -262,6 +275,18 @@ class Simulator:
         from .integrators.rk_mhd import MHDRKIntegrator
 
         integrator_key = (self.time_integrator or "ader").lower()
+        # Block-based (multi-block / AMR) arrays carry a meshblock axis where
+        # ADER expects its time-node axis, so those runs are RK-only.
+        block_based = (
+            self.forest.Nblocks > 1
+            or self.forest.max_level > 0
+            or self.adapt_interval is not None
+        )
+        if integrator_key == "ader" and block_based:
+            raise ValueError(
+                "Block-based (multi-block / AMR) runs currently support only "
+                "RK time integrators. Use time_integrator='rk*'."
+            )
         if integrator_key == "ader":
             self.integrator = ADER_Integrator(m=self.m, ndim=self.ndim)
             self.ader = True
@@ -539,7 +564,28 @@ class Simulator:
         self.integrator.update(self.scheme)
         self.scheme.post_update()
         self.time += self.dt
+        self.maybe_adapt()
         return True
+
+    def maybe_adapt(self) -> None:
+        """Dynamic AMR: tag + adapt after the step completes so new children
+        prolongate from the just-updated solution, not the pre-step state.
+
+        No-op unless ``adapt_interval`` and a refine/derefine predicate are
+        set (requires a block-based scheme exposing tag_blocks/adapt).
+        """
+        if (self.adapt_interval is None
+                or self.n_step % self.adapt_interval != 0
+                or (self.refine_fn is None and self.derefine_fn is None)):
+            return
+        to_r, to_d = self.scheme.tag_blocks(
+            refine_fn=self.refine_fn,
+            derefine_fn=self.derefine_fn,
+            max_level=self.amr_max_level,
+        )
+        if to_r or to_d:
+            self.scheme.adapt(to_refine=to_r, to_derefine=to_d)
+            self.dt = self.scheme.dt
 
     def perform_iterations(self, n_step: int) -> None:
         self.init_sim()
