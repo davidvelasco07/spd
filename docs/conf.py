@@ -20,6 +20,7 @@ release = "0.1"
 
 extensions = [
     "myst_nb",
+    "sphinx_thebe",
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
     "sphinx.ext.napoleon",
@@ -44,6 +45,14 @@ myst_enable_extensions = ["dollarmath", "amsmath"]
 
 nb_execution_mode = "off"
 nb_merge_streams = True
+
+thebe_config = {
+    "repository_url": "https://github.com/davidvelasco07/spd",
+    "repository_branch": "main",
+    "selector": ".cell",
+    "selector_input": "div.cell_input pre",
+    "selector_output": ".cell_output",
+}
 
 html_theme = "furo"
 html_static_path = ["_static"]

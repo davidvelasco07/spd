@@ -6,6 +6,7 @@
 .venv/
 docs/_build/
 docs/notebooks/
+docs/tutorials/*.md
 test/core.*
 
 temp

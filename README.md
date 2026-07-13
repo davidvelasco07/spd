@@ -75,10 +75,10 @@ unchanged.
 | `spd/initial_conditions/` | Parametrised test-problem ICs |
 | `test/` | Pytest suite (creation, transforms, GPU smoke tests) |
 | `notebooks/Introduction.ipynb` | Tutorial notebook (tracked in git; embedded in docs) |
-| `docs/tutorials/` | Hydro, induction, and MHD tutorial pages (MyST) |
+| `docs/tutorials/` | Hydro, induction, and MHD tutorials (Jupyter notebooks with Live Code) |
 
 See the architecture guide in the docs for extension points (new schemes,
-integrators, or equation sets). Regenerate the MyST tutorial pages after editing
+integrators, or equation sets). Regenerate the doc tutorials after editing
 ``notebooks/_build_tutorials.py`` with ``python notebooks/_build_tutorials.py --myst``.
 
 ## Tests
@@ -99,7 +99,8 @@ https://davidvelasco07.github.io/spd/
 The site covers the modular layout (simulator → scheme → integrator → physics),
 configuration options, the Python API reference, and tutorials: the
 [Introduction notebook](https://davidvelasco07.github.io/spd/notebooks/Introduction.html)
-(with pre-rendered plots) plus MyST pages for
+(with pre-rendered plots) plus interactive tutorials for
 [hydro](https://davidvelasco07.github.io/spd/tutorials/hydro.html),
 [induction](https://davidvelasco07.github.io/spd/tutorials/induction.html), and
-[MHD](https://davidvelasco07.github.io/spd/tutorials/mhd.html).
+[MHD](https://davidvelasco07.github.io/spd/tutorials/mhd.html). On those pages,
+click **Live Code** in the toolbar to run cells in the browser via Binder.

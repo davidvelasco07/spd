@@ -3,7 +3,7 @@
 Run from ``notebooks/``:
 
 - ``python _build_tutorials.py`` -- rebuild all ``*.ipynb`` sources
-- ``python _build_tutorials.py --myst`` -- write ``docs/tutorials/*.md`` only
+- ``python _build_tutorials.py --myst`` -- write ``docs/tutorials/*.ipynb`` for the docs site
 - ``python _build_tutorials.py Hydro`` -- rebuild one notebook
 """
 from pathlib import Path
@@ -20,16 +20,41 @@ KERNELSPEC = {
 DOCS_TUTORIALS = Path(__file__).resolve().parent.parent / "docs" / "tutorials"
 
 
-def build(path, cells):
+def build(path, cells, *, tag_first_code=None):
     nb = nbf.v4.new_notebook()
     nb.metadata.update(KERNELSPEC)
-    nb.cells = [
-        nbf.v4.new_markdown_cell(src) if kind == "md"
-        else nbf.v4.new_code_cell(src)
-        for kind, src in cells
-    ]
+    nb.cells = []
+    first_code = True
+    for kind, src in cells:
+        if kind == "md":
+            nb.cells.append(nbf.v4.new_markdown_cell(_myst_links(src)))
+        else:
+            cell = nbf.v4.new_code_cell(src)
+            if first_code and tag_first_code:
+                cell.metadata["tags"] = [tag_first_code]
+            first_code = False
+            nb.cells.append(cell)
     nbf.write(nb, path)
     print("wrote", path)
+
+
+LIVE_CODE_BANNER = """\
+```{admonition} Run this tutorial in your browser
+:class: tip
+
+Click **Live Code** in the toolbar to connect a Binder kernel and execute the cells
+below. Binder runs CPU NumPy (no GPU); plots appear inline after each cell finishes.
+```"""
+
+
+def write_doc_notebook(name, cells, out_dir=DOCS_TUTORIALS):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    doc_cells = [("md", LIVE_CODE_BANNER)] + cells
+    build(
+        out_dir / f"{name.lower()}.ipynb",
+        doc_cells,
+        tag_first_code="thebe-init",
+    )
 
 
 def _myst_links(text):
@@ -70,13 +95,35 @@ def _myst_links(text):
     )
 
 
+MYST_FRONTMATTER = """\
+---
+kernelspec:
+  display_name: Python 3
+  language: python
+  name: python3
+---
+"""
+
+
 def cells_to_myst(cells):
-    parts = []
+    """Legacy MyST-markdown export (prefer write_doc_notebook for docs)."""
+    parts = [
+        MYST_FRONTMATTER,
+        LIVE_CODE_BANNER + "\n",
+    ]
+    first_code = True
     for kind, src in cells:
         if kind == "md":
             parts.append(_myst_links(src))
+        elif first_code:
+            parts.append(
+                f"```{{code-cell}} ipython3\n"
+                f":tags: [thebe-init]\n\n"
+                f"{src}\n```"
+            )
+            first_code = False
         else:
-            parts.append(f"```python\n{src}\n```")
+            parts.append(f"```{{code-cell}} ipython3\n{src}\n```")
     return "\n\n".join(parts) + "\n"
 
 
@@ -913,11 +960,11 @@ if myst_only:
 
 if myst_only:
     for name in MYST_TARGETS:
-        write_myst(name, targets[name])
+        write_doc_notebook(name, targets[name])
 else:
     selected = args or list(targets)
     for name in selected:
         if name in MYST_TARGETS:
-            write_myst(name, targets[name])
+            write_doc_notebook(name, targets[name])
         if name in targets:
             build(f"{name}.ipynb", targets[name])
