@@ -57,6 +57,7 @@ class SD_AMR_Scheme(SD_Scheme):
         self.compute_positions()
         self._refresh_block_metrics()
         self.post_init()
+        self._alloc_dual_layout_buffers()
         self.allocate_arrays(ader=False)
         self.init_Boundaries()
         self.create_dicts()
@@ -240,6 +241,42 @@ class SD_AMR_Scheme(SD_Scheme):
         else:
             return np.transpose(reshaped, (0, 1, 2, 4, 6, 3, 5, 7))
 
+    def _alloc_dual_layout_buffers(self) -> None:
+        """Persistent SD- and FV-layout cell-average buffers.
+
+        The SD<->FV layout switches (used by the MUSCL fallback) swap
+        ``dm.U_cv``/``dm.W_cv`` between these fixed arrays instead of
+        allocating transposed copies each time (same contract as the
+        single-grid SD_Scheme). Must be re-run after every forest change.
+        """
+        self.dm.U_cv_sd = self.dm.U_cv
+        self.dm.W_cv_sd = self.dm.W_cv
+        # transpose->reshape copies for ndim>1; in 1D the layouts coincide
+        # and the "copy" is a view, which is exactly right there.
+        self.dm.U_cv_fv = self.transpose_to_fv(self.dm.U_cv)
+        self.dm.W_cv_fv = self.transpose_to_fv(self.dm.W_cv)
+
+    def compute_cv_from_sp_fv(self, M_sp, out=None) -> np.ndarray:
+        """sp -> cv projection emitted in the block-preserving FV layout.
+
+        The single-grid SD_Scheme fuses projection and transpose into one
+        einsum; the block layout keeps them separate (projection over the
+        trailing point axes, then a strided per-block transpose).
+        """
+        res = self.transpose_to_fv(self.compute_cv_from_sp(M_sp))
+        if out is None:
+            return res
+        out[...] = res
+        return out
+
+    def compute_sp_from_cv_fv(self, M_fv, out=None) -> np.ndarray:
+        """Block-preserving FV layout -> cv -> sp projection."""
+        res = self.compute_sp_from_cv(self.transpose_to_sd(M_fv))
+        if out is None:
+            return res
+        out[...] = res
+        return out
+
     # ----------------------------------------------------------------
     # Positions / geometry
     # ----------------------------------------------------------------
@@ -411,6 +448,7 @@ class SD_AMR_Scheme(SD_Scheme):
         self.dm.W_sp = self.array_sp()
         self.dm.U_sp = self.array_sp()
         self.dm.U_cv = self.array_sp()
+        self._alloc_dual_layout_buffers()
         # Flux/RS/BC buffers + RK stage arrays (via integrator).
         self.allocate_arrays(ader=False)
         self._refresh_block_metrics()

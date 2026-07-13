@@ -350,6 +350,12 @@ class FallbackScheme(FV_Scheme):
         """
         detect_troubles(self)
 
+    def refresh_theta_ghosts(self, theta) -> None:
+        """Hook called after apply_blending. On a single global grid the
+        ghost cells written by the blending pass are already consistent;
+        the block-based AMR fallback overrides this to re-exchange theta
+        across block interfaces."""
+
     # ----------------------------------------------------------------
     # Flux blending
     # ----------------------------------------------------------------

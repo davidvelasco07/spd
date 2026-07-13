@@ -277,6 +277,9 @@ def detect_troubles(self: Simulator):
 
     if self.blending:
         apply_blending(self,trouble,theta)
+        # Block-based AMR: re-exchange theta so its ghost cells reflect the
+        # neighbor blocks' post-blending values (no-op on a global grid).
+        self.refresh_theta_ghosts(theta)
 
     for dim in self.dims:
         idim = self.dims[dim]
@@ -295,19 +298,22 @@ def neighborhood_extrema(M, ndim, neighbors):
     """
     if is_gpu_array(M):
         from cupyx.scipy import ndimage as cundi
+        # Leading batch axes (nvar, and Nb for block-based AMR arrays) get
+        # size-1 filter extents so the extrema never mix across them.
+        lead = M.ndim - ndim
         if neighbors == "2nd":
-            size = (1,) + (3,) * ndim
+            size = (1,) * lead + (3,) * ndim
             return (
                 cundi.maximum_filter(M, size=size, mode="nearest"),
                 cundi.minimum_filter(M, size=size, mode="nearest"),
             )
-        fp = np.zeros((1,) + (3,) * ndim, dtype=bool)
-        center = (0,) + (1,) * ndim
+        fp = np.zeros((1,) * lead + (3,) * ndim, dtype=bool)
+        center = (0,) * lead + (1,) * ndim
         fp[center] = True
         for ax in range(ndim):
             for off in (0, 2):
                 idx = list(center)
-                idx[1 + ax] = off
+                idx[lead + ax] = off
                 fp[tuple(idx)] = True
         return (
             cundi.maximum_filter(M, footprint=cp.asarray(fp), mode="nearest"),
@@ -406,23 +412,30 @@ def apply_blending(self,trouble,theta):
         theta[cut(None,-1,idim)] = np.maximum(.75*trouble[cut( 1,None,idim)],theta[cut(None,-1,idim)])
         theta[cut( 1,None,idim)] = np.maximum(.75*trouble[cut(None,-1,idim)],theta[cut( 1,None,idim)])
           
+    # Diagonal-neighbor slices target the trailing ndim cell axes; the
+    # Ellipsis prefix absorbs any leading batch axes (e.g. Nb for the
+    # block-based AMR arrays) and is a no-op on plain [cells...] arrays.
     if self.ndim==2:
         #Second neighbors
         for i in range(len(cuts)):
-            theta[cuts[i]] = np.maximum(.5*trouble[cuts[::-1][i]],theta[cuts[i]])
+            idx  = (Ellipsis,) + cuts[i]
+            idx2 = (Ellipsis,) + cuts[::-1][i]
+            theta[idx] = np.maximum(.5*trouble[idx2],theta[idx])
                 
     elif self.ndim==3:
         #Second neighbors
         for i in range(len(cuts)):
             for idim in self.idims:
-                shape1 = tuple(np.roll(np.array((slice(None),)+cuts[ i]),-idim))
-                shape2 = tuple(np.roll(np.array((slice(None),)+cuts[::-1][i]),-idim))
+                shape1 = (Ellipsis,) + tuple(np.roll(np.array((slice(None),)+cuts[ i]),-idim))
+                shape2 = (Ellipsis,) + tuple(np.roll(np.array((slice(None),)+cuts[::-1][i]),-idim))
                 theta[shape1] = np.maximum(.5*trouble[shape2],theta[shape1])
         #Third neighbors
         cuts1 = [(x,y,z) for x in (a,b) for y in (a,b) for z in (a,b)]
         cuts2 = [(x,y,z) for x in (b,a) for y in (b,a) for z in (b,a)]
         for i in range(len(cuts1)):
-            theta[cuts1[i]] = np.maximum(.375*trouble[cuts2[i]],theta[cuts1[i]])
+            idx  = (Ellipsis,) + cuts1[i]
+            idx2 = (Ellipsis,) + cuts2[i]
+            theta[idx] = np.maximum(.375*trouble[idx2],theta[idx])
     
     #Last layer
     for idim in self.idims:
@@ -444,10 +457,17 @@ def apply_blending_gpu(self, trouble, theta):
     """
     from cupyx.scipy import ndimage as cundi
 
+    # Leading batch axes (Nb for block-based AMR arrays) get size-1 filter
+    # extents so trouble never spreads across blocks (the ghost-cell
+    # exchange handles cross-block visibility).
+    lead = trouble.ndim - self.ndim
     for w, fp in _blending_footprints(self.ndim):
-        f = cundi.maximum_filter(trouble, footprint=fp, mode="constant", cval=0.0)
+        fpb = fp.reshape((1,) * lead + fp.shape)
+        f = cundi.maximum_filter(trouble, footprint=fpb, mode="constant", cval=0.0)
         cp.maximum(theta, w * f, out=theta)
-    ring = cundi.maximum_filter(theta, size=3, mode="constant", cval=0.0)
+    ring = cundi.maximum_filter(
+        theta, size=(1,) * lead + (3,) * self.ndim, mode="constant", cval=0.0
+    )
     cp.maximum(theta, 0.25 * (ring > 0), out=theta)
      
         

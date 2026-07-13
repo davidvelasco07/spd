@@ -120,6 +120,15 @@ class HydroSimulator(Simulator):
         Simulator.__init__(self, init=False, *args, **kwargs)
         self.init = init
 
+        # Block-based runs (multi-block forests, static refinement, or
+        # dynamic AMR hooks) use the AMR-capable schemes whose arrays carry
+        # a meshblock axis.
+        block_based = (
+            self.forest.Nblocks > 1
+            or self.forest.max_level > 0
+            or self.adapt_interval is not None
+        )
+
         # Default fallback reconstruction depends on the time integrator.
         # MUSCL-Hancock adds a half-step (dt-dependent) time prediction that
         # suits the ADER update but is not a pure spatial RHS, so under a
@@ -132,10 +141,19 @@ class HydroSimulator(Simulator):
 
         # Create SD scheme (primary high-order scheme)
         if ho_scheme_cls is None:
-            ho_scheme_cls = SD_Scheme
+            if block_based and "SD" in scheme:
+                from spd.spectral_difference.sd_amr_scheme import SD_AMR_Scheme
+                ho_scheme_cls = SD_AMR_Scheme
+            else:
+                ho_scheme_cls = SD_Scheme
         if "SD" in scheme:
             self.ho_scheme = ho_scheme_cls(self, riemann_solver=riemann_solver_ho)
         elif "FV" in scheme:
+            if block_based:
+                raise NotImplementedError(
+                    "Block-based runs require an SD primary scheme "
+                    "(FV-primary AMR is not supported yet)."
+                )
             for dim in self.dims:
                 self.n[dim] = 1
                 setattr(self, f"n{dim}", 1)
@@ -153,7 +171,11 @@ class HydroSimulator(Simulator):
 
         # Create Fallback scheme (MUSCL/MUSCL-Hancock)
         if fb_scheme_cls is None:
-            fb_scheme_cls = FallbackScheme
+            if block_based:
+                from spd.fallback.fallback_amr import FallbackAMRScheme
+                fb_scheme_cls = FallbackAMRScheme
+            else:
+                fb_scheme_cls = FallbackScheme
         if "FB" in scheme:
             self.lo_scheme = fb_scheme_cls(
                 self,
@@ -237,6 +259,7 @@ class HydroSimulator(Simulator):
             U_full = self.dm.U_cv + self.dm.U_eq_cv
         self.compute_primitives(U_full, W=self.dm.W_cv)
         self.time += self.dt
+        self.maybe_adapt()
         return True
 
     # ------------------------------------------------------------------
