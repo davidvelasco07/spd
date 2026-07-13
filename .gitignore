@@ -11,3 +11,7 @@ temp
 jobs
 
 **/*.egg-info
+
+# notebooks: keep only Introduction.ipynb tracked
+notebooks/**
+!notebooks/Introduction.ipynb
