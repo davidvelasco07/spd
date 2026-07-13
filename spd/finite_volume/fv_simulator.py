@@ -23,7 +23,7 @@ class FV_Simulator(Simulator):
 
     Parameters
     ----------
-    riemann_solver_fv : str
+    riemann_solver : str
         Riemann solver name ('llf', 'hllc', 'lhllc').
     slope_limiter : str
         Slope limiter name ('minmod', 'moncen').
@@ -35,7 +35,7 @@ class FV_Simulator(Simulator):
 
     def __init__(
         self,
-        riemann_solver_fv: str = "llf",
+        riemann_solver: str = "llf",
         slope_limiter: str = "minmod",
         scheme: str = "MUSCL-Hancock",
         time_integrator: str = "ader",
@@ -55,7 +55,7 @@ class FV_Simulator(Simulator):
         # Create the semi-discrete FV scheme
         self.scheme = FV_Scheme(
             self,
-            riemann_solver=riemann_solver_fv,
+            riemann_solver=riemann_solver,
             slope_limiter=slope_limiter,
             scheme=scheme,
         )

@@ -28,7 +28,7 @@ class FV_Scheme(SemiDiscreteScheme):
     ----------
     sim : Simulator
         Parent simulator providing shared state.
-    riemann_solver_fv : str
+    riemann_solver : str
         Name of the Riemann solver ('llf', 'hllc', 'lhllc').
     slope_limiter : str
         Name of the slope limiter ('minmod', 'moncen').

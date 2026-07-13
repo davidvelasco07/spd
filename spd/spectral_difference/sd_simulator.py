@@ -21,7 +21,7 @@ class SD_Simulator(Simulator):
 
     Parameters
     ----------
-    riemann_solver_sd : str
+    riemann_solver : str
         Riemann solver name for the SD faces ('llf', 'hllc', 'lhllc').
     *args, **kwargs
         Forwarded to Simulator.__init__().

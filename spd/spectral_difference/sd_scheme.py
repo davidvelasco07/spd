@@ -40,7 +40,7 @@ class SD_Scheme(SemiDiscreteScheme):
     ----------
     sim : Simulator
         Parent simulator providing shared state.
-    riemann_solver_sd : str
+    riemann_solver : str
         Name of the Riemann solver ('llf', 'hllc', 'lhllc').
     """
 
@@ -539,7 +539,8 @@ class SD_Scheme(SemiDiscreteScheme):
         for dim in self.dims:
             idim = self.dims[dim]
             self.M_fp[dim][...] = self.compute_primitives(self.M_fp[dim])
-            bc.Boundaries_sd(self, self.M_fp[dim], dim)
+            bc.store_interfaces(self, self.M_fp[dim], dim)
+            bc.Boundaries(self, self.M_fp[dim], dim)
             M = self.ML_fp[dim]
             bc.apply_interfaces(self, M, self.M_fp[dim], dim)
             dW_sp[idim] = self.compute_gradient(self.M_fp[dim], dim, ader=ader)
@@ -552,7 +553,8 @@ class SD_Scheme(SemiDiscreteScheme):
                 dW_fp[idim] = self.compute_fp_from_sp(
                     dW_sp[idim], dim, ader=ader
                 )
-                bc.Boundaries_sd(self, dW_fp[idim], dim)
+                bc.store_interfaces(self, dW_fp[idim], dim)
+                bc.Boundaries(self, dW_fp[idim], dim)
                 dW = self.MR_fp[dim]
                 bc.apply_interfaces(self, dW, dW_fp[idim], dim)
             self.F_fp[dim][...] -= self.compute_viscous_fluxes(

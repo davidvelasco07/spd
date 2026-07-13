@@ -33,7 +33,7 @@ class MHDSimulator(HydroSimulator):
     def __init__(
         self,
         equations=mhd_eq,
-        riemann_solver_sd: str = "llf",
+        riemann_solver_ho: str = "llf",
         *args,
         **kwargs,
     ):
@@ -53,7 +53,7 @@ class MHDSimulator(HydroSimulator):
             ho_scheme_cls=MHD_SD_Scheme,
             fv_scheme_cls=MHD_FV_Scheme,
             fb_scheme_cls=MHDFallbackScheme,
-            riemann_solver_sd=riemann_solver_sd,
+            riemann_solver_ho=riemann_solver_ho,
             **kwargs,
         )
 
