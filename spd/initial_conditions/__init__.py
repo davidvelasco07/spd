@@ -53,6 +53,7 @@ sod = parametrized(ic1d.sod_shock_tube)
 RTI = parametrized(ic2d.RTI)
 KH_instability = parametrized(ic2d.KH_instability)
 double_mach_reflection = parametrized(ic2d.double_mach_reflection)
+implosion = parametrized(ic2d.implosion)
 
 __all__ = [
     "ic1d",
@@ -65,4 +66,5 @@ __all__ = [
     "RTI",
     "KH_instability",
     "double_mach_reflection",
+    "implosion",
 ]

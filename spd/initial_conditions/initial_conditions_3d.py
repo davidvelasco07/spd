@@ -32,9 +32,9 @@ def step_function(xyz: np.ndarray,case: int, vx=1, vy=1, vz=1, P=1):
 
 def sine_wave(xyz: np.ndarray,case: int, A=0.125, vx=1, vy=1, vz=1, P=1):
     if xyz.shape[0]==1:
-        return ic1d.sine_wave(xyz,case,vx=vx,P=P)
+        return ic1d.sine_wave(xyz,case,A=A,vx=vx,P=P)
     if xyz.shape[0]==2:
-        return ic2d.sine_wave(xyz,case,vx=vx,vy=vy,P=P)
+        return ic2d.sine_wave(xyz,case,A=A,vx=vx,vy=vy,P=P)
     x=xyz[0]
     y=xyz[1]
     z=xyz[2]

@@ -89,7 +89,7 @@ def sine_wave(xy: np.ndarray,case: int, A=0.125, vx=1, vy=1, P=1):
     elif case==2:
         #vy
         return vy*np.ones(x.shape)
-    elif case==3:
+    elif case==4:
         #Pressure
         return P*np.ones(x.shape)
     else:
@@ -182,6 +182,36 @@ def RTI(
     elif case == -1:
         # Gravitational potential phi (acceleration g_y = -dphi/dy = g)
         return g * y
+    else:
+        return np.zeros(x.shape)
+
+
+def implosion(
+    xy: np.ndarray,
+    case: int,
+    rho_in=0.125,
+    P_in=0.14,
+    rho_out=1.0,
+    P_out=1.0,
+    diag=0.15,
+) -> np.ndarray:
+    """Implosion problem (Liska & Wendroff 2003, sec. 4.7).
+
+    A low-density, low-pressure triangle in the corner (below the diagonal
+    ``x + y = diag``) of an otherwise uniform gas at rest.  The inward-moving
+    shock reflects off the origin and a jet forms along the diagonal.
+
+    Recommended setup: domain ``[0, 0.3] x [0, 0.3]``, reflective walls on
+    all four sides, ``gamma = 1.4``.  Preserving the x <-> y symmetry of the
+    jet to late times (t = 2.5) is the hard part of this test.
+    """
+    x = xy[0]
+    y = xy[1]
+    inside = x + y < diag
+    if case == 0:
+        return np.where(inside, rho_in, rho_out)
+    elif case == 4:
+        return np.where(inside, P_in, P_out)
     else:
         return np.zeros(x.shape)
 

@@ -22,7 +22,7 @@ def sine_wave(xy: np.ndarray,case: int, A=0.125, vx=1, P=1):
     elif case==1:
         #vx
         return vx*np.ones(x.shape)
-    elif case==2:
+    elif case==4:
         #Pressure
         return P*np.ones(x.shape)
     else:
@@ -33,7 +33,7 @@ def sod_shock_tube(x: np.ndarray, case: int) -> np.ndarray:
     if case==0:
         #density
         return np.where(x < 0.5, 1., 0.125)
-    elif case==2:
+    elif case==4:
         #pressure
         return np.where(x < 0.5, 1., 0.1)
     else:
