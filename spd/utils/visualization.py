@@ -50,4 +50,4 @@ def plot_field(s: Simulator,
         x = s.regular_centers()[0]
         plt.plot(x,M[var])
     ttl = plot_title if plot_title is not None else s.variables[var]
-    plt.title(ttl, **kwargs)
+    plt.title(ttl)

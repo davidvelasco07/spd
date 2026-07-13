@@ -414,13 +414,18 @@ class Simulator:
         ]
 
     def regular_centers(self):
+        """Midpoints of the N*n regular cells (consistent with regular_faces)."""
         N = self.N
         n = self.n
         lim = self.lim
-        return [
-            np.linspace(lim[dim][0], lim[dim][1], N[dim] * n[dim])
-            for dim in self.dims
-        ]
+        centers = []
+        for dim in self.dims:
+            h = self.len[dim] / (N[dim] * n[dim])
+            centers.append(
+                np.linspace(lim[dim][0] + 0.5 * h, lim[dim][1] - 0.5 * h,
+                            N[dim] * n[dim])
+            )
+        return centers
 
     def crop(self, M, ngh=1) -> np.ndarray:
         return M[
