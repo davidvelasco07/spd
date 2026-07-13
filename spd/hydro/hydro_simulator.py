@@ -44,10 +44,16 @@ class HydroSimulator(Simulator):
         Use pure Godunov (no blending).
     limiting_variables : list
         Variable indices for NAD (default: density and pressure).
+    max_revs : int
+        Maximum number of MOOD detection/revision sweeps per update
+        (used when ``blending=False``).
     predictor : bool
         Use MUSCL-Hancock for fallback.
-    riemann_solver_sd, riemann_solver_fv : str
-        Riemann solver names.
+    riemann_solver : str or None
+        When given, supersedes both per-scheme solvers below.
+    riemann_solver_ho, riemann_solver_lo : str
+        Riemann solver names for the primary (high-order) scheme and the
+        low-order fallback scheme respectively.
     slope_limiter : str
         Slope limiter name.
     """
@@ -68,9 +74,11 @@ class HydroSimulator(Simulator):
         min_P: float = 1e-10,
         godunov: bool = False,
         limiting_variables: list = None,
+        max_revs: int = 5,
         predictor: bool = False,
-        riemann_solver_sd: str = "llf",
-        riemann_solver_fv: str = "llf",
+        riemann_solver: str = None,
+        riemann_solver_ho: str = "llf",
+        riemann_solver_lo: str = "llf",
         slope_limiter: str = "minmod",
         ho_scheme_cls=None,
         fv_scheme_cls=None,
@@ -87,6 +95,11 @@ class HydroSimulator(Simulator):
             elif not FB and "FB" in scheme:
                 scheme = scheme.replace("FB", "")
 
+        # A single riemann_solver supersedes the per-scheme settings.
+        if riemann_solver is not None:
+            riemann_solver_ho = riemann_solver
+            riemann_solver_lo = riemann_solver
+
         # Store FB params before super().__init__
         self._fb_params = dict(
             tolerance=tolerance,
@@ -100,6 +113,7 @@ class HydroSimulator(Simulator):
             min_P=min_P,
             godunov=godunov,
             limiting_variables=limiting_variables,
+            max_revs=max_revs,
         )
 
         init = kwargs.pop("init", True)
@@ -120,7 +134,7 @@ class HydroSimulator(Simulator):
         if ho_scheme_cls is None:
             ho_scheme_cls = SD_Scheme
         if "SD" in scheme:
-            self.ho_scheme = ho_scheme_cls(self, riemann_solver=riemann_solver_sd)
+            self.ho_scheme = ho_scheme_cls(self, riemann_solver=riemann_solver_ho)
         elif "FV" in scheme:
             for dim in self.dims:
                 self.n[dim] = 1
@@ -129,7 +143,7 @@ class HydroSimulator(Simulator):
                 fv_scheme_cls = FV_Scheme
             self.ho_scheme = fv_scheme_cls(
                 self,
-                riemann_solver=riemann_solver_fv,
+                riemann_solver=riemann_solver_lo,
                 slope_limiter=slope_limiter,
                 scheme=fallback,
             )
@@ -144,7 +158,7 @@ class HydroSimulator(Simulator):
             self.lo_scheme = fb_scheme_cls(
                 self,
                 primary=self.ho_scheme,
-                riemann_solver=riemann_solver_fv,
+                riemann_solver=riemann_solver_lo,
                 slope_limiter=slope_limiter,
                 scheme=fallback,
                 **self._fb_params,
