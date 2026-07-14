@@ -356,6 +356,9 @@ class FallbackScheme(FV_Scheme):
         the block-based AMR fallback overrides this to re-exchange theta
         across block interfaces."""
 
+    def minimize_alpha_across_blocks(self, alpha, dims=None) -> None:
+        """Hook: see FallbackAMRScheme. No-op on a single global grid."""
+
     # ----------------------------------------------------------------
     # Flux blending
     # ----------------------------------------------------------------

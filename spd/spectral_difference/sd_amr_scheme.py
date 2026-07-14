@@ -241,6 +241,13 @@ class SD_AMR_Scheme(SD_Scheme):
         else:
             return np.transpose(reshaped, (0, 1, 2, 4, 6, 3, 5, 7))
 
+    def _fv_cell_shape(self):
+        """Shape of the persistent block-preserving FV cell buffers."""
+        shape = [self.nvar, self.forest.Nblocks]
+        for dim in list(self.dims.keys())[::-1]:
+            shape.append(self.NB[dim] * self.n[dim])
+        return tuple(shape)
+
     def _alloc_dual_layout_buffers(self) -> None:
         """Persistent SD- and FV-layout cell-average buffers.
 
@@ -248,13 +255,24 @@ class SD_AMR_Scheme(SD_Scheme):
         ``dm.U_cv``/``dm.W_cv`` between these fixed arrays instead of
         allocating transposed copies each time (same contract as the
         single-grid SD_Scheme). Must be re-run after every forest change.
+
+        For ``ndim>1`` the FV buffers are allocated empty: content is filled
+        on the first ``switch_to_finite_volume``. That avoids a full-forest
+        transpose copy at every adapt realloc (important when
+        ``Nblocks`` is large).
         """
         self.dm.U_cv_sd = self.dm.U_cv
         self.dm.W_cv_sd = self.dm.W_cv
-        # transpose->reshape copies for ndim>1; in 1D the layouts coincide
-        # and the "copy" is a view, which is exactly right there.
-        self.dm.U_cv_fv = self.transpose_to_fv(self.dm.U_cv)
-        self.dm.W_cv_fv = self.transpose_to_fv(self.dm.W_cv)
+        if self.ndim == 1:
+            # Layouts coincide; reshape views are correct and cheap.
+            self.dm.U_cv_fv = self.transpose_to_fv(self.dm.U_cv)
+            self.dm.W_cv_fv = self.transpose_to_fv(self.dm.W_cv)
+            return
+        shape = self._fv_cell_shape()
+        proto = self.dm.U_cv
+        xp = self.dm.xp
+        self.dm.U_cv_fv = xp.empty(shape, dtype=proto.dtype)
+        self.dm.W_cv_fv = xp.empty(shape, dtype=proto.dtype)
 
     def compute_cv_from_sp_fv(self, M_sp, out=None) -> np.ndarray:
         """sp -> cv projection emitted in the block-preserving FV layout.
@@ -382,18 +400,35 @@ class SD_AMR_Scheme(SD_Scheme):
     # Dynamic AMR: tagging, adaptation, state remap
     # ----------------------------------------------------------------
 
-    def tag_blocks(self, refine_fn=None, derefine_fn=None, max_level=None):
+    def tag_blocks(self, refine_fn=None, derefine_fn=None, max_level=None,
+                   refine_fn_batched=None, derefine_fn_batched=None):
         """Tag blocks for refinement / derefinement via user predicates.
 
-        refine_fn(block, W_block) -> bool : True to refine this block.
-                 Blocks already at max_level are skipped.
-        derefine_fn(parent_logical, sibling_blocks, sibling_W) -> bool :
-                 True to merge this sibling group. Only called for groups
-                 where all 2**ndim siblings exist at the same level.
+        Parameters
+        ----------
+        refine_fn(block, W_block) -> bool
+            Per-block callback (may sync GPU per call — prefer batched).
+        refine_fn_batched(W_sp) -> bool array of length Nblocks
+            Vectorized refine predicate; one host sync for the whole forest.
+        derefine_fn(parent_logical, sibling_blocks, sibling_W) -> bool
+            Per-sibling-group callback.
+        derefine_fn_batched(groups) -> iterable of bool
+            ``groups`` is a list of
+            ``(parent_logical, sibling_blocks, sibling_W_list)``.
         """
         W_sp = self.compute_primitives(self.dm.U_sp)
         to_refine = []
-        if refine_fn is not None:
+        if refine_fn_batched is not None:
+            flags = refine_fn_batched(W_sp)
+            if hasattr(flags, "get"):
+                flags = flags.get()
+            flags = np.asarray(flags, dtype=bool).reshape(-1)
+            for ib, block in enumerate(self.forest.blocks):
+                if max_level is not None and block.level >= max_level:
+                    continue
+                if flags[ib]:
+                    to_refine.append(ib)
+        elif refine_fn is not None:
             for ib, block in enumerate(self.forest.blocks):
                 if max_level is not None and block.level >= max_level:
                     continue
@@ -401,7 +436,7 @@ class SD_AMR_Scheme(SD_Scheme):
                     to_refine.append(ib)
 
         to_derefine = []
-        if derefine_fn is not None:
+        if derefine_fn is not None or derefine_fn_batched is not None:
             groups = {}
             for ib, b in enumerate(self.forest.blocks):
                 if b.level == 0:
@@ -409,13 +444,23 @@ class SD_AMR_Scheme(SD_Scheme):
                 pl_key = (b.level, tuple(c // 2 for c in b.logical))
                 groups.setdefault(pl_key, []).append(ib)
             n_sib = 2 ** self.ndim
+            cand = []
             for (lvl, parent_logical), ibs in groups.items():
                 if len(ibs) != n_sib:
                     continue
                 sibs = [self.forest.blocks[i] for i in ibs]
                 sib_W = [W_sp[:, i] for i in ibs]
-                if derefine_fn(parent_logical, sibs, sib_W):
-                    to_derefine.append(ibs)
+                cand.append((parent_logical, sibs, sib_W, ibs))
+            if derefine_fn_batched is not None:
+                packed = [(pl, sibs, sW) for pl, sibs, sW, _ in cand]
+                flags = list(derefine_fn_batched(packed))
+                for flag, (_, _, _, ibs) in zip(flags, cand):
+                    if flag:
+                        to_derefine.append(ibs)
+            elif derefine_fn is not None:
+                for parent_logical, sibs, sib_W, ibs in cand:
+                    if derefine_fn(parent_logical, sibs, sib_W):
+                        to_derefine.append(ibs)
         return to_refine, to_derefine
 
     def adapt(self, to_refine=None, to_derefine=None) -> None:
@@ -426,18 +471,24 @@ class SD_AMR_Scheme(SD_Scheme):
         if not to_refine and not to_derefine:
             return
         snapshot = self._snapshot_U_sp()
-        # Resolve ibs to block objects so mutation order is irrelevant.
+        # Resolve ibs → block objects so mutation order is irrelevant, then
+        # batch via refine_blocks / derefine_blocks (one neighbor rebuild each).
         refine_refs = [self.forest.blocks[i] for i in to_refine]
         derefine_refs = [[self.forest.blocks[i] for i in sibs]
                          for sibs in to_derefine]
-        for block in refine_refs:
-            self.forest.refine_block(self.forest.blocks.index(block))
-        for sibs in derefine_refs:
-            sib_ibs = [self.forest.blocks.index(b) for b in sibs]
-            self.forest.derefine_block(sib_ibs)
+        if derefine_refs:
+            id_map = self.forest._id_map()
+            self.forest.derefine_blocks(
+                [[id_map[id(b)] for b in sibs] for sibs in derefine_refs]
+            )
+        if refine_refs:
+            id_map = self.forest._id_map()
+            self.forest.refine_blocks([id_map[id(b)] for b in refine_refs])
         self.forest.enforce_2to1_balance()
         self._arrays_realloc()
         self._transfer_from_snapshot(snapshot)
+        # Drop the pre-adapt U_sp copy promptly (can be large on deep trees).
+        snapshot.clear()
         self.init_Boundaries()
         # dt may shrink: new fine blocks have smaller h.
         self.compute_dt()
@@ -455,37 +506,55 @@ class SD_AMR_Scheme(SD_Scheme):
         self.create_dicts()
 
     def _snapshot_U_sp(self) -> dict:
-        """Snapshot U_sp keyed by (level, logical)."""
+        """Snapshot U_sp as one device copy + key→old_ib index.
+
+        Avoids Nb host/device ``.copy()`` round-trips that previously
+        dominated adapt on forests with thousands of blocks.
+        """
+        keys = [(b.level, b.logical) for b in self.forest.blocks]
         return {
-            (b.level, b.logical): self.dm.U_sp[:, ib].copy()
-            for ib, b in enumerate(self.forest.blocks)
+            "keys": keys,
+            "key_to_ib": {k: i for i, k in enumerate(keys)},
+            "data": self.dm.U_sp.copy(),
         }
 
     def _transfer_from_snapshot(self, snapshot: dict) -> None:
         """Populate dm.U_sp for every block in the new forest via direct
-        copy / prolongation / restriction; refresh derived arrays."""
+        copy / prolongation / restriction; refresh derived arrays.
+
+        Groups copy / prolong / restrict operations and issues batched
+        tensor ops (one prolongate/restrict call per unique parent set)
+        rather than a Python-dispatched kernel per leaf block.
+        """
         ndim = self.ndim
         dim_keys = list(self.dims.keys())
         xp = self.dm.xp
         LM_p = self.dm.LM_prolong
         R_side_sp = self.dm.RS_sp
+        key_to_ib = snapshot["key_to_ib"]
+        data = snapshot["data"]
+
+        copy_new, copy_old = [], []
+        # parent_key -> list of (new_ib, sub_idx)
+        prolong = {}
+        # list of (new_ib, [child_keys...])
+        restrict = []
+
         for ib, block in enumerate(self.forest.blocks):
             key = (block.level, block.logical)
-            if key in snapshot:
-                self.dm.U_sp[:, ib] = snapshot[key]
+            if key in key_to_ib:
+                copy_new.append(ib)
+                copy_old.append(key_to_ib[key])
                 continue
-            # Prolongation from parent.
             parent_logical = tuple(c // 2 for c in block.logical)
             parent_key = (block.level - 1, parent_logical)
-            if parent_key in snapshot:
-                children_U = prolongate_block(snapshot[parent_key], LM_p, ndim)
+            if parent_key in key_to_ib:
                 sub_idx = 0
                 for k, d in enumerate(dim_keys):
                     offset = block.logical[k] - 2 * parent_logical[k]
                     sub_idx += (1 << k) * offset
-                self.dm.U_sp[:, ib] = children_U[:, sub_idx]
+                prolong.setdefault(parent_key, []).append((ib, sub_idx))
                 continue
-            # Restriction from children.
             child_keys = []
             for sub_idx in range(2 ** ndim):
                 child_logical = tuple(
@@ -493,17 +562,56 @@ class SD_AMR_Scheme(SD_Scheme):
                     for k in range(ndim)
                 )
                 child_keys.append((block.level + 1, child_logical))
-            if all(k in snapshot for k in child_keys):
-                stack = xp.stack([snapshot[k] for k in child_keys], axis=1)
-                self.dm.U_sp[:, ib] = restrict_blocks_overlap_sp(
-                    stack, R_side_sp, self.dm.cv_to_sp, ndim
-                )
+            if all(k in key_to_ib for k in child_keys):
+                restrict.append((ib, child_keys))
                 continue
             raise RuntimeError(
                 f"No source data for block {key} (ib={ib}): neither the "
                 f"block itself, its parent {parent_key}, nor its full set "
                 f"of children was in the snapshot."
             )
+
+        if copy_new:
+            self.dm.U_sp[:, xp.asarray(copy_new)] = (
+                data[:, xp.asarray(copy_old)]
+            )
+
+        for parent_key, children in prolong.items():
+            children_U = prolongate_block(
+                data[:, key_to_ib[parent_key]], LM_p, ndim
+            )
+            for new_ib, sub_idx in children:
+                self.dm.U_sp[:, new_ib] = children_U[:, sub_idx]
+
+        if restrict:
+            # Each entry: [nvar, 2**ndim, NB..., n...]; stack →
+            # [nvar, Ng, 2**ndim, ...] so restrict treats Ng as a batch axis.
+            stacks = []
+            new_ibs = []
+            for new_ib, child_keys in restrict:
+                stacks.append(xp.stack(
+                    [data[:, key_to_ib[k]] for k in child_keys], axis=1
+                ))
+                new_ibs.append(new_ib)
+            batch = xp.stack(stacks, axis=1)
+            coarse = restrict_blocks_overlap_sp(
+                batch, R_side_sp, self.dm.cv_to_sp, ndim
+            )
+            self.dm.U_sp[:, xp.asarray(new_ibs)] = coarse
+
         self.dm.W_sp[...] = self.compute_primitives(self.dm.U_sp)
         self.dm.U_cv[...] = self.compute_cv_from_sp(self.dm.U_sp)
         self.dm.W_cv[...] = self.compute_cv_from_sp(self.dm.W_sp)
+
+    @property
+    def domain_size(self):
+        """Total solution-point count over all leaf blocks.
+
+        Every meshblock carries ``prod(NB[d]*(p+1))`` DOFs; refinement
+        increases ``forest.Nblocks`` while ``NB`` stays fixed, so the
+        leaf count (not the base ``N``) is the right zone-cycle weight.
+        """
+        n_per_block = float(np.prod(
+            [self.NB[dim] * (self.p + 1) for dim in self.dims]
+        ))
+        return int(self.forest.Nblocks) * n_per_block

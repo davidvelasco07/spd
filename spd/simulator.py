@@ -76,6 +76,8 @@ class Simulator:
         levels=None,
         refine_fn=None,
         derefine_fn=None,
+        refine_fn_batched=None,
+        derefine_fn_batched=None,
         adapt_interval: int = None,
         amr_max_level: int = None,
         verbose=True,
@@ -233,6 +235,8 @@ class Simulator:
         # after every ``adapt_interval`` steps (block-based schemes only).
         self.refine_fn = refine_fn
         self.derefine_fn = derefine_fn
+        self.refine_fn_batched = refine_fn_batched
+        self.derefine_fn_batched = derefine_fn_batched
         self.adapt_interval = adapt_interval
         self.amr_max_level = amr_max_level
 
@@ -574,13 +578,18 @@ class Simulator:
         No-op unless ``adapt_interval`` and a refine/derefine predicate are
         set (requires a block-based scheme exposing tag_blocks/adapt).
         """
+        refine_fn_b = getattr(self, "refine_fn_batched", None)
+        derefine_fn_b = getattr(self, "derefine_fn_batched", None)
         if (self.adapt_interval is None
                 or self.n_step % self.adapt_interval != 0
-                or (self.refine_fn is None and self.derefine_fn is None)):
+                or (self.refine_fn is None and self.derefine_fn is None
+                    and refine_fn_b is None and derefine_fn_b is None)):
             return
         to_r, to_d = self.scheme.tag_blocks(
             refine_fn=self.refine_fn,
             derefine_fn=self.derefine_fn,
+            refine_fn_batched=refine_fn_b,
+            derefine_fn_batched=derefine_fn_b,
             max_level=self.amr_max_level,
         )
         if to_r or to_d:

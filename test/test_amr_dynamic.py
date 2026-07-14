@@ -73,6 +73,46 @@ def test_dynamic_amr_regrids_and_conserves_mass():
     assert np.isfinite(s.dm.W_cv).all()
 
 
+def test_batched_tag_blocks_matches_per_block():
+    """Vectorized refine/derefine flags agree with the scalar callbacks."""
+    def rough(block, W):
+        return float(W[0].max() - W[0].min()) > 0.05
+
+    def rough_batched(W_sp):
+        rho = W_sp[0]
+        axes = tuple(range(1, rho.ndim))
+        return (rho.max(axis=axes) - rho.min(axis=axes)) > 0.05
+
+    def smooth(pl, sibs, sW):
+        return max(float(W[0].max() - W[0].min()) for W in sW) < 0.02
+
+    def smooth_batched(groups):
+        return [
+            max(float(W[0].max() - W[0].min()) for W in sW) < 0.02
+            for _pl, _sibs, sW in groups
+        ]
+
+    s = SD_Simulator(Nb=(4, 4), init_fct=_gaussian,
+                     refine_fn=rough, derefine_fn=smooth,
+                     refine_fn_batched=rough_batched,
+                     derefine_fn_batched=smooth_batched,
+                     adapt_interval=3, amr_max_level=1, **COMMON)
+    # Force at least one adapt so some L1 blocks exist for derefine groups.
+    s.perform_time_evolution(0.05)
+    to_r_b, to_d_b = s.scheme.tag_blocks(
+        refine_fn_batched=rough_batched,
+        derefine_fn_batched=smooth_batched,
+        max_level=1,
+    )
+    to_r, to_d = s.scheme.tag_blocks(
+        refine_fn=rough, derefine_fn=smooth, max_level=1,
+    )
+    assert sorted(to_r_b) == sorted(to_r)
+    assert sorted(tuple(sorted(g)) for g in to_d_b) == sorted(
+        tuple(sorted(g)) for g in to_d
+    )
+
+
 def test_ader_rejected_for_block_based_runs():
     with pytest.raises(ValueError):
         SD_Simulator(p=2, N=(16, 16), Nb=(4, 4), time_integrator="ader",

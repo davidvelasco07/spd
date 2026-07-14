@@ -87,12 +87,22 @@ class FallbackAMRScheme(FallbackScheme):
                 f"h_cv_nb_{dim}", h_cv[:, np.newaxis, ...] * level_factor
             )
             self.dm.__setattr__(f"centers_nb_{dim}", cv_b)
+            # Smooth-extrema alpha = vL / (0.5 * h * d2U) is scale-invariant
+            # only when h and the centers (used for the divided differences)
+            # share the same length scale. Centers are level-0 for every
+            # block, so SED must use the UNSCALED h (the level-scaled one
+            # would inflate alpha by 2^level on refined blocks and wrongly
+            # relax the NAD check there).
+            self.dm.__setattr__(f"h_fp_sed_nb_{dim}", h_fp)
 
     def working_arrays(self) -> None:
+        self.sed_h_fp = {}
         for dim in self.dims:
             self.h_fp[dim] = self.dm.__getattribute__(f"h_fp_nb_{dim}")
             self.h_cv[dim] = self.dm.__getattribute__(f"h_cv_nb_{dim}")
             self.centers[dim] = self.dm.__getattribute__(f"centers_nb_{dim}")
+            self.sed_h_fp[dim] = self.dm.__getattribute__(
+                f"h_fp_sed_nb_{dim}")
             # Rank-global face coordinates (kept for API compatibility;
             # unused by the block-based fallback path).
             self.faces[dim] = self.primary.faces[dim]
@@ -147,8 +157,8 @@ class FallbackAMRScheme(FallbackScheme):
     def Boundaries(self, M: np.ndarray, all=True):
         fvb.Boundaries(self, M, all=all)
 
-    def Boundaries_scalar(self, M: np.ndarray):
-        fvb.Boundaries_scalar(self, M)
+    def Boundaries_scalar(self, M: np.ndarray, dims=None):
+        fvb.Boundaries_scalar(self, M, dims=dims)
 
     def refresh_theta_ghosts(self, theta: np.ndarray) -> None:
         """Re-exchange theta after apply_blending: the blending pass writes
@@ -160,6 +170,40 @@ class FallbackAMRScheme(FallbackScheme):
         self.fill_active_region(self.crop(self.dm.theta, ngh=ngh))
         self.Boundaries_scalar(self.dm.M)
         theta[...] = self.dm.M[0]
+
+    def minimize_alpha_across_blocks(self, alpha: np.ndarray,
+                                     dims=None) -> None:
+        """Apply SED ``compute_min`` on a forest-ghosted alpha field.
+
+        Packs **all** limiting-variable channels into ``dm.M`` and exchanges
+        only the coupling dimensions in one ``Boundaries_scalar`` pass, then
+        runs ``compute_min`` so the 3-point stencil spans block faces —
+        matching the single-grid SED neighborhood on a uniform decomposition.
+
+        Previously this issued one full (all-dim) ghost exchange per limiting
+        variable; with typical 2 vars × 3 dims that was 6 orchestrations /
+        SED call, each scanning every block.
+        """
+        from spd.fallback.trouble_detection import compute_min
+
+        ngh = self.Nghc
+        ndim = self.ndim
+        nlim = alpha.shape[0]
+        couple_dims = self.dims if dims is None else {
+            d: self.dims[d] for d in dims
+        }
+        active_sl = (slice(None),) + (slice(ngh, -ngh),) * ndim
+        # Pack every limiting channel; exchange only the dims we couple.
+        self.dm.M[...] = 0
+        self.dm.M[(slice(0, nlim),) + active_sl] = alpha
+        self.Boundaries_scalar(self.dm.M, dims=list(couple_dims.keys()))
+        A = self.dm.M[:nlim]
+        Amin = A.copy()
+        for dim in couple_dims:
+            idim = couple_dims[dim]
+            compute_min(A, Amin, idim)
+            A, Amin = Amin, A
+        alpha[...] = A[(slice(None),) + active_sl]
 
     # ----------------------------------------------------------------
     # High-order flux staging (block layout)
@@ -223,6 +267,7 @@ class FallbackAMRScheme(FallbackScheme):
     # ----------------------------------------------------------------
 
     def tag_blocks(self, **kwargs):
+        """Forward to primary; accepts refine_fn_batched / derefine_fn_batched."""
         return self.primary.tag_blocks(**kwargs)
 
     def adapt(self, to_refine=None, to_derefine=None) -> None:

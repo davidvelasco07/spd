@@ -30,6 +30,31 @@ def _block_view(M: np.ndarray, ib: int) -> np.ndarray:
     return M[(slice(None),) * N_LEAD + (ib,)]
 
 
+def _store_BC_coarser_fused(dst, faces, by_sub, LM_prolong, ndim):
+    """Fuse coarse→fine face fills over all ``sub`` buckets into one
+    prolongate call (big launch win when many C-F faces exist)."""
+    items = [(int(sub), ib_c, jb_c)
+             for sub, (ib_c, jb_c) in by_sub.items() if len(ib_c)]
+    if not items:
+        return
+    if ndim == 1:
+        for _sub, ib_c, jb_c in items:
+            dst[:, ib_c] = faces[:, jb_c]
+        return
+    if len(items) == 1:
+        sub, ib_c, jb_c = items[0]
+        prolongated = prolongate_block(faces[:, jb_c], LM_prolong, ndim - 1)
+        dst[:, ib_c] = prolongated[:, :, sub]
+        return
+    jb_all = np.concatenate([jb for _, _, jb in items])
+    prolongated = prolongate_block(faces[:, jb_all], LM_prolong, ndim - 1)
+    offset = 0
+    for sub, ib_c, jb_c in items:
+        n = int(ib_c.shape[0]) if hasattr(ib_c, "shape") else len(ib_c)
+        dst[:, ib_c] = prolongated[:, offset:offset + n, sub]
+        offset += n
+
+
 def store_interfaces(self, M: np.ndarray, dim: str) -> None:
     """Store flux-point traces at element extremes into MR/ML at every
     interior face. The ellipsis in cut/indices absorbs the Nb axis."""
@@ -47,7 +72,20 @@ def apply_interfaces(self, F: np.ndarray, F_fp: np.ndarray, dim: str) -> None:
 
 def store_BC(self, BC_array: np.ndarray, M: np.ndarray, dim: str) -> None:
     """Populate BC_array[side, :, ib, ...] for every block and side from the
-    forest neighbor table."""
+    forest neighbor table.
+
+    Blocks are processed in relation groups (one vectorized gather/scatter
+    per group) rather than per block: the Python loop over blocks makes GPU
+    execution kernel-launch bound. Coarse→fine faces fuse all ``sub``
+    buckets into one prolongate (see ``_store_BC_coarser_fused``).
+
+    CUDA Graphs were evaluated for the tiny-block regime: a static graph
+    over one RK stage is invalidated on every adapt (neighbor tables and
+    ``Nblocks`` change), and capturing only the post-adapt steady phase
+    still leaves the Python orchestration of dims/sides/relations outside
+    the graph. Fusion of C-F gathers + batched restrictions recovers the
+    bulk of the launch win without graph machinery.
+    """
     idim = self.dims[dim]
     ndim = self.ndim
     LM_prolong = self.dm.LM_prolong
@@ -59,71 +97,120 @@ def store_BC(self, BC_array: np.ndarray, M: np.ndarray, dim: str) -> None:
         if same_jb is not None:
             # Fast path: every block's neighbor on this face is SAME-level.
             BC_array[side][...] = xp.take(
-                M[face_idx], xp.asarray(same_jb), axis=N_LEAD
+                M[face_idx], self.forest.dev_same_jb(dim, side, xp),
+                axis=N_LEAD
             )
             continue
-        for ib, block in enumerate(self.forest.blocks):
-            entries = block.neighbors[dim][side]
-            bc_slot = _block_view(BC_array[side], ib)
-            rel0 = entries[0][1]
+        groups = self.forest.dev_groups(dim, side, xp)
+        if groups is None:
+            _store_BC_block_loop(self, BC_array, M, dim, side, face_idx)
+            continue
 
-            if len(entries) == 1 and rel0 == SAME:
+        faces = M[face_idx]     # view: [nvar, Nb, faces...]
+        dst = BC_array[side]    # [nvar, Nb, faces...]
+
+        ib_s, jb_s = groups["same"]
+        if len(ib_s):
+            dst[:, ib_s] = faces[:, jb_s]
+
+        # Domain boundaries: few blocks, and BC types need scalar logic.
+        for ib in groups["bc"]:
+            bc_slot = _block_view(dst, int(ib))
+            src = _block_view(M, int(ib))
+            bc_type = self.BC[dim][side]
+            if bc_type == "reflective":
+                bc_slot[...] = src[indices2(-side, ndim, idim)]
+                bc_slot[self.vels[idim]] *= -1
+            elif bc_type == "gradfree":
+                bc_slot[...] = src[indices2(-side, ndim, idim)]
+            elif bc_type in ("ic", "eq"):
+                pass
+            elif bc_type == "pressure":
+                src[indices2(-side, ndim, idim)] = bc_slot
+            else:
+                raise ValueError(f"Undetermined boundary type: {bc_type}")
+
+        # Fine blocks facing a coarser neighbor: one gather + one prolongate
+        # for all sub-buckets, then scatter each sub from the shared result.
+        _store_BC_coarser_fused(dst, faces, groups["coarser_by_sub"],
+                                LM_prolong, ndim)
+
+        # Coarse blocks facing finer neighbors: gather [nvar, K, n_sub, ...]
+        # (columns ordered by sub_idx) and restrict the whole group at once.
+        fi_ib, fi_jb = groups["finer"]
+        if len(fi_ib):
+            if ndim == 1:
+                dst[:, fi_ib] = faces[:, fi_jb[:, 0]]
+            else:
+                dst[:, fi_ib] = restrict_blocks_overlap_sp(
+                    faces[:, fi_jb], R_side_sp, self.dm.cv_to_sp, ndim - 1
+                )
+
+
+def _store_BC_block_loop(self, BC_array, M, dim, side, face_idx):
+    """Per-block fallback for faces with mixed/unsupported relations
+    (reports the offending block)."""
+    idim = self.dims[dim]
+    ndim = self.ndim
+    xp = self.dm.xp
+    for ib, block in enumerate(self.forest.blocks):
+        entries = block.neighbors[dim][side]
+        bc_slot = _block_view(BC_array[side], ib)
+        rel0 = entries[0][1]
+
+        if len(entries) == 1 and rel0 == SAME:
+            jb, _rel, _sub = entries[0]
+            bc_slot[...] = _block_view(M, jb)[face_idx]
+
+        elif len(entries) == 1 and rel0 == BC:
+            src = _block_view(M, ib)
+            bc_type = self.BC[dim][side]
+            if bc_type == "reflective":
+                bc_slot[...] = src[indices2(-side, ndim, idim)]
+                bc_slot[self.vels[idim]] *= -1
+            elif bc_type == "gradfree":
+                bc_slot[...] = src[indices2(-side, ndim, idim)]
+            elif bc_type in ("ic", "eq"):
+                pass
+            elif bc_type == "pressure":
+                src[indices2(-side, ndim, idim)] = bc_slot
+            else:
+                raise ValueError(f"Undetermined boundary type: {bc_type}")
+
+        elif len(entries) == 1 and rel0 == COARSER:
+            jb, _rel, sub = entries[0]
+            coarse_trace = _block_view(M, jb)[face_idx]
+            if ndim == 1:
+                bc_slot[...] = coarse_trace
+            else:
+                prolongated = prolongate_block(
+                    coarse_trace, self.dm.LM_prolong, ndim - 1
+                )
+                bc_slot[...] = prolongated[
+                    (slice(None),) * N_LEAD + (sub,)
+                ]
+
+        elif all(e[1] == FINER for e in entries):
+            if ndim == 1:
                 jb, _rel, _sub = entries[0]
                 bc_slot[...] = _block_view(M, jb)[face_idx]
-
-            elif len(entries) == 1 and rel0 == BC:
-                src = _block_view(M, ib)
-                bc_type = self.BC[dim][side]
-                if bc_type == "reflective":
-                    bc_slot[...] = src[indices2(-side, ndim, idim)]
-                    bc_slot[self.vels[idim]] *= -1
-                elif bc_type == "gradfree":
-                    bc_slot[...] = src[indices2(-side, ndim, idim)]
-                elif bc_type in ("ic", "eq"):
-                    pass
-                elif bc_type == "pressure":
-                    src[indices2(-side, ndim, idim)] = bc_slot
-                else:
-                    raise ValueError(f"Undetermined boundary type: {bc_type}")
-
-            elif len(entries) == 1 and rel0 == COARSER:
-                # Fine block facing a coarser neighbor: prolongate the coarse
-                # face trace to fine resolution and pick our sub-face.
-                jb, _rel, sub = entries[0]
-                coarse_trace = _block_view(M, jb)[face_idx]
-                if ndim == 1:
-                    bc_slot[...] = coarse_trace
-                else:
-                    prolongated = prolongate_block(
-                        coarse_trace, LM_prolong, ndim - 1
-                    )
-                    bc_slot[...] = prolongated[
-                        (slice(None),) * N_LEAD + (sub,)
-                    ]
-
-            elif all(e[1] == FINER for e in entries):
-                # Coarse block facing finer neighbors: collect the fine face
-                # traces (ordered by sub_idx) and restrict.
-                if ndim == 1:
-                    jb, _rel, _sub = entries[0]
-                    bc_slot[...] = _block_view(M, jb)[face_idx]
-                else:
-                    n_sub = 2 ** (ndim - 1)
-                    assert len(entries) == n_sub, (
-                        f"expected {n_sub} finer neighbors; got {len(entries)}")
-                    traces = [None] * n_sub
-                    for (jb, _rel, sub) in entries:
-                        traces[sub] = _block_view(M, jb)[face_idx]
-                    stack = xp.stack(traces, axis=N_LEAD)
-                    bc_slot[...] = restrict_blocks_overlap_sp(
-                        stack, R_side_sp, self.dm.cv_to_sp, ndim - 1
-                    )
-
             else:
-                rels = [e[1] for e in entries]
-                raise NotImplementedError(
-                    f"Mixed neighbor relations {rels} not handled "
-                    f"(ib={ib}, dim={dim}, side={side}).")
+                n_sub = 2 ** (ndim - 1)
+                assert len(entries) == n_sub, (
+                    f"expected {n_sub} finer neighbors; got {len(entries)}")
+                traces = [None] * n_sub
+                for (jb, _rel, sub) in entries:
+                    traces[sub] = _block_view(M, jb)[face_idx]
+                stack = xp.stack(traces, axis=N_LEAD)
+                bc_slot[...] = restrict_blocks_overlap_sp(
+                    stack, self.dm.RS_sp, self.dm.cv_to_sp, ndim - 1
+                )
+
+        else:
+            rels = [e[1] for e in entries]
+            raise NotImplementedError(
+                f"Mixed neighbor relations {rels} not handled "
+                f"(ib={ib}, dim={dim}, side={side}).")
 
 
 def apply_BC(self, dim: str) -> None:
@@ -152,15 +239,31 @@ def correct_coarse_fine_flux(self, F_fp: np.ndarray, dim: str) -> None:
     ndim = self.ndim
     R_side_sp = self.dm.RS_sp
     xp = self.dm.xp
-    for ib, block in enumerate(self.forest.blocks):
-        for side in (0, 1):
+    for side in (0, 1):
+        groups = self.forest.dev_groups(dim, side, xp)
+        fine_face_sel = indices2(side - 1, ndim, idim)
+        my_face_sel = indices2(-side, ndim, idim)
+        if groups is not None:
+            # Batched: one gather + one restriction for all coarse blocks
+            # with finer neighbors on this face.
+            fi_ib, fi_jb = groups["finer"]
+            if not len(fi_ib):
+                continue
+            fine_faces = F_fp[fine_face_sel]    # view [nvar, Nb, ...]
+            my_faces = F_fp[my_face_sel]        # view [nvar, Nb, ...]
+            if ndim == 1:
+                my_faces[:, fi_ib] = fine_faces[:, fi_jb[:, 0]]
+            else:
+                my_faces[:, fi_ib] = restrict_blocks_overlap_sp(
+                    fine_faces[:, fi_jb], R_side_sp, self.dm.cv_to_sp,
+                    ndim - 1
+                )
+            continue
+        for ib, block in enumerate(self.forest.blocks):
             entries = block.neighbors[dim][side]
             if not entries or entries[0][1] != FINER:
                 continue
-            fine_face_sel = indices2(side - 1, ndim, idim)
-            my_face_sel = indices2(-side, ndim, idim)
             my_view = _block_view(F_fp, ib)
-
             if ndim == 1:
                 (jb, _rel, _sub) = entries[0]
                 my_view[my_face_sel] = _block_view(F_fp, jb)[fine_face_sel]

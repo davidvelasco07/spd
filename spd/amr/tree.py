@@ -5,6 +5,15 @@ Blocks may live at different refinement levels in a single forest; the
 physical element size scales as ``h[dim] = h0[dim] / 2**level``. Neighbor
 relations account for level differences, and the forest enforces 2:1
 balance (no two neighbors differ by more than one level).
+
+Practical guidance (3D GPU)
+---------------------------
+Small ``NB`` yields many leaf blocks and a high ghost/interior ratio: each
+FV exchange pays ``O(Nblocks)`` launches for trivial kernels. Prefer
+``NB >= 8`` per dimension in 3D production runs; ``NB = 2`` remains useful
+for correctness tests but is dispatch-bound (CPU-bound / ~0% GPU) once the
+forest grows past a few thousand blocks. See ``temp/amr_memory_overhead.py``
+for a quantified halo + dual-layout breakdown.
 """
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -246,26 +255,113 @@ class BlockForest:
     def _build_fast_paths(self) -> None:
         """Precompute per-face data for vectorized boundary exchange.
 
-        If every block's neighbor on (dim, side) is a SAME-level block,
-        build a int64 array of length Nblocks with the neighbor's ib.
-        Otherwise store None and the caller falls back to the per-block
-        Python loop (AMR / BC / MPI-edge paths).
+        Two structures are built per (dim, side):
+
+        - ``same_jb``: if every block's neighbor on this face is SAME-level,
+          an int64 array of length Nblocks with the neighbor's ib (single
+          full-width gather). None otherwise.
+        - ``face_groups``: blocks bucketed by neighbor relation so boundary
+          exchange and flux corrections run one vectorized gather/scatter
+          per relation group instead of a per-block Python loop:
+            "same":    (ib_arr, jb_arr)
+            "bc":      ib_arr
+            "coarser": (ib_arr, jb_arr, sub_arr)
+            "finer":   (ib_arr, jb_mat[K, 2^(ndim-1)]) columns ordered by sub
+          None when a face has mixed/unsupported relations (callers fall
+          back to the per-block loop, which reports the error).
         """
         import numpy as _np
         self.same_jb = {d: [None, None] for d in self.dims}
+        self.face_groups = {d: [None, None] for d in self.dims}
+        self._dev_cache = {}
         Nb = len(self.blocks)
+        n_sub = 2 ** (self.ndim - 1)
         for dim in self.dims:
             for side in (0, 1):
                 jbs = _np.empty(Nb, dtype=_np.int64)
                 all_same = True
+                same_ib, same_jb = [], []
+                bc_ib = []
+                co_ib, co_jb, co_sub = [], [], []
+                fi_ib, fi_jb = [], []
+                groups_ok = True
                 for ib, b in enumerate(self.blocks):
                     entries = b.neighbors[dim][side]
-                    if len(entries) == 1 and entries[0][1] == SAME:
+                    rel0 = entries[0][1] if entries else None
+                    if len(entries) == 1 and rel0 == SAME:
                         jbs[ib] = entries[0][0]
+                        same_ib.append(ib)
+                        same_jb.append(entries[0][0])
+                        continue
+                    all_same = False
+                    if len(entries) == 1 and rel0 == BC:
+                        bc_ib.append(ib)
+                    elif len(entries) == 1 and rel0 == COARSER:
+                        co_ib.append(ib)
+                        co_jb.append(entries[0][0])
+                        co_sub.append(entries[0][2] or 0)
+                    elif entries and all(e[1] == FINER for e in entries):
+                        row = [-1] * n_sub
+                        for (jb, _rel, sub) in entries:
+                            row[sub if sub is not None else 0] = jb
+                        if -1 in row:
+                            groups_ok = False
+                            break
+                        fi_ib.append(ib)
+                        fi_jb.append(row)
                     else:
-                        all_same = False
+                        groups_ok = False
                         break
                 self.same_jb[dim][side] = jbs if all_same else None
+                if groups_ok:
+                    arr = lambda x: _np.asarray(x, dtype=_np.int64)
+                    co_by_sub = {}
+                    for s in sorted(set(co_sub)):
+                        sel = [k for k, v in enumerate(co_sub) if v == s]
+                        co_by_sub[s] = (arr([co_ib[k] for k in sel]),
+                                        arr([co_jb[k] for k in sel]))
+                    self.face_groups[dim][side] = {
+                        "same": (arr(same_ib), arr(same_jb)),
+                        "bc": arr(bc_ib),
+                        "coarser": (arr(co_ib), arr(co_jb), arr(co_sub)),
+                        "coarser_by_sub": co_by_sub,
+                        "finer": (arr(fi_ib),
+                                  arr(fi_jb).reshape(len(fi_ib), n_sub)),
+                    }
+                else:
+                    self.face_groups[dim][side] = None
+
+    def dev_groups(self, dim: str, side: int, xp):
+        """``face_groups[dim][side]`` with index arrays converted to the
+        array backend ``xp`` (cached until the next ``_rebuild_neighbors``)."""
+        g = self.face_groups[dim][side]
+        if g is None:
+            return None
+        key = (dim, side, xp.__name__)
+        hit = self._dev_cache.get(key)
+        if hit is not None:
+            return hit
+        conv = {
+            "same": tuple(xp.asarray(a) for a in g["same"]),
+            "bc": g["bc"],   # consumed by a host-side loop
+            "coarser": tuple(xp.asarray(a) for a in g["coarser"]),
+            "coarser_by_sub": {
+                s: tuple(xp.asarray(a) for a in pair)
+                for s, pair in g["coarser_by_sub"].items()
+            },
+            "finer": tuple(xp.asarray(a) for a in g["finer"]),
+        }
+        self._dev_cache[key] = conv
+        return conv
+
+    def dev_same_jb(self, dim: str, side: int, xp):
+        """``same_jb[dim][side]`` on the array backend ``xp`` (cached)."""
+        key = ("same_jb", dim, side, xp.__name__)
+        hit = self._dev_cache.get(key)
+        if hit is None:
+            hit = xp.asarray(self.same_jb[dim][side])
+            self._dev_cache[key] = hit
+        return hit
 
     def _sub_face_index_logical(self, coarse: MeshBlock, fine: MeshBlock,
                                  dim: str) -> int:
@@ -348,27 +444,12 @@ class BlockForest:
                 return
             self.refine_blocks(to_refine)
 
-    def refine_blocks(self, ibs: List[int]) -> List[int]:
-        """Refine several blocks (convenience wrapper around `refine_block`).
+    def _id_map(self) -> Dict[int, int]:
+        """``id(block) -> current list index`` (O(Nblocks), no linear scans)."""
+        return {id(b): i for i, b in enumerate(self.blocks)}
 
-        Handles the index-shift gotcha: ibs are resolved to concrete block
-        objects up front, so the order of refinement does not matter.
-        Returns the final list indices of every new child block.
-        """
-        targets = [self.blocks[i] for i in ibs]
-        produced: List[MeshBlock] = []
-        for block in targets:
-            ib = self.blocks.index(block)
-            child_ibs = self.refine_block(ib)
-            produced.extend(self.blocks[c] for c in child_ibs)
-        return [self.blocks.index(c) for c in produced]
-
-    def refine_block(self, ib: int) -> List[int]:
-        """Replace block ``ib`` with 2**ndim children at level+1.
-
-        Returns the new child ibs (in row-major iz,iy,ix order). Does NOT
-        enforce 2:1 balance — call ``enforce_2to1_balance()`` afterwards.
-        """
+    def _refine_block_mutate(self, ib: int) -> List[MeshBlock]:
+        """Replace block ``ib`` with children; do NOT rebuild neighbors."""
         parent = self.blocks[ib]
         dim_keys = list(self.dims.keys())
         child_h = {d: parent.h[d] * 0.5 for d in self.dims}
@@ -382,7 +463,8 @@ class BlockForest:
             for iy in iy_range:
                 for ix in ix_range:
                     child_logical = tuple(
-                        2 * parent.logical[dim_keys.index(d)] + {"x": ix, "y": iy, "z": iz}[d]
+                        2 * parent.logical[dim_keys.index(d)]
+                        + {"x": ix, "y": iy, "z": iz}[d]
                         for d in dim_keys
                     )
                     b_lim = {}
@@ -392,43 +474,57 @@ class BlockForest:
                         sel = {"x": ix, "y": iy, "z": iz}[d]
                         b_lim[d] = (lo, mid) if sel == 0 else (mid, hi)
                     children.append(MeshBlock(
-                        ib=-1,                      # placeholder, fixed by _rebuild_neighbors
+                        ib=-1,
                         level=new_level,
                         logical=child_logical,
                         lim=b_lim,
                         h=dict(child_h),
                     ))
-
-        # Remove the parent; append children at the end.
         self.blocks.pop(ib)
-        start = len(self.blocks)
         self.blocks.extend(children)
-        new_ibs = list(range(start, start + len(children)))
-        self._rebuild_neighbors()
-        # After _rebuild_neighbors the ib field has been updated; but the
-        # list indices of the children might not match `new_ibs` because the
-        # list was reindexed. Return the new list indices of the children.
-        return [self.blocks.index(c) for c in children]
+        return children
 
-    def derefine_block(self, ibs: List[int]) -> int:
-        """Replace 2**ndim sibling blocks with their common parent.
+    def refine_blocks(self, ibs: List[int]) -> List[int]:
+        """Refine several blocks with a **single** neighbor rebuild.
 
-        Returns the ib of the new parent. Raises if the given blocks are
-        not sibling children at the same level.
+        Handles the index-shift gotcha: ibs are resolved to concrete block
+        objects up front, so the order of refinement does not matter.
+        Returns the final list indices of every new child block.
         """
+        targets = [self.blocks[i] for i in ibs]
+        produced: List[MeshBlock] = []
+        for block in targets:
+            id_map = self._id_map()
+            child_objs = self._refine_block_mutate(id_map[id(block)])
+            produced.extend(child_objs)
+        self._rebuild_neighbors()
+        id_map = self._id_map()
+        return [id_map[id(c)] for c in produced]
+
+    def refine_block(self, ib: int) -> List[int]:
+        """Replace block ``ib`` with 2**ndim children at level+1.
+
+        Returns the new child ibs (in row-major iz,iy,ix order). Does NOT
+        enforce 2:1 balance — call ``enforce_2to1_balance()`` afterwards.
+        Prefer :meth:`refine_blocks` when mutating many blocks.
+        """
+        return self.refine_blocks([ib])
+
+    def _derefine_block_mutate(self, ibs: List[int]) -> MeshBlock:
+        """Replace siblings with their parent; do NOT rebuild neighbors."""
         if len(ibs) != 2 ** self.ndim:
-            raise ValueError(f"derefine expects 2**ndim={2**self.ndim} siblings; got {len(ibs)}")
+            raise ValueError(
+                f"derefine expects 2**ndim={2**self.ndim} siblings; "
+                f"got {len(ibs)}")
         siblings = [self.blocks[i] for i in ibs]
         levels = {b.level for b in siblings}
         if len(levels) != 1 or siblings[0].level == 0:
-            raise ValueError("derefine requires all siblings at a common level > 0")
-        # Check they really are siblings: their logical coords at level-1
-        # should all be the same.
+            raise ValueError("derefine requires all siblings at a common "
+                             "level > 0")
         parent_logical = tuple(c >> 1 for c in siblings[0].logical)
         for b in siblings[1:]:
             if tuple(c >> 1 for c in b.logical) != parent_logical:
                 raise ValueError("blocks are not siblings")
-        # Build the parent by unioning the children's physical extents.
         parent_lim = {
             d: (min(b.lim[d][0] for b in siblings),
                 max(b.lim[d][1] for b in siblings))
@@ -442,17 +538,46 @@ class BlockForest:
             lim=parent_lim,
             h=parent_h,
         )
-        # Remove siblings (largest index first to avoid shift).
         for i in sorted(ibs, reverse=True):
             self.blocks.pop(i)
         self.blocks.append(parent)
+        return parent
+
+    def derefine_blocks(self, groups: List[List[int]]) -> List[int]:
+        """Derefine several sibling groups with a **single** neighbor rebuild.
+
+        Returns the final list indices of the new parent blocks.
+        """
+        if not groups:
+            return []
+        # Resolve to objects first so index shifts don't matter.
+        group_objs = [[self.blocks[i] for i in g] for g in groups]
+        parents: List[MeshBlock] = []
+        for sibs in group_objs:
+            id_map = self._id_map()
+            ibs = [id_map[id(b)] for b in sibs]
+            parents.append(self._derefine_block_mutate(ibs))
         self._rebuild_neighbors()
-        return self.blocks.index(parent)
+        id_map = self._id_map()
+        return [id_map[id(p)] for p in parents]
+
+    def derefine_block(self, ibs: List[int]) -> int:
+        """Replace 2**ndim sibling blocks with their common parent.
+
+        Returns the ib of the new parent. Raises if the given blocks are
+        not sibling children at the same level.
+        Prefer :meth:`derefine_blocks` when mutating many groups.
+        """
+        return self.derefine_blocks([ibs])[0]
 
     # ------------------------------------------------------------ balance
     def enforce_2to1_balance(self) -> int:
         """Cascade-refine any block whose neighbor is more than one level
-        deeper. Returns the number of blocks refined."""
+        deeper. Returns the number of blocks refined.
+
+        Each cascade pass refines **all** currently violating blocks then
+        rebuilds neighbors once (rather than one rebuild per refine).
+        """
         total = 0
         while True:
             to_refine = set()
@@ -467,10 +592,6 @@ class BlockForest:
                                 to_refine.add(ib)
             if not to_refine:
                 return total
-            # Refine one at a time (indexes shift on each refine).
-            # Grab an ib whose block still exists.
-            # We must refine a SPECIFIC block, not a stale index, so refine
-            # the first one and re-scan.
-            ib = next(iter(to_refine))
-            self.refine_block(ib)
-            total += 1
+            ibs = sorted(to_refine)
+            self.refine_blocks(ibs)
+            total += len(ibs)

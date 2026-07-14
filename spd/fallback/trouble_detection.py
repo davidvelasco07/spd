@@ -241,9 +241,17 @@ def detect_troubles(self: Simulator):
         self.Boundaries(self.dm.M)
         M_lv = self.dm.M[lv]
         alpha = W_new_lv*0 + 1
+        # On multi-block forests, defer the SED 3-point compute_min until
+        # after a ghost exchange so it spans block faces (matching a
+        # single grid). Single-grid keeps neighborhood_min inside SED.
+        block_sed = getattr(self.forest, "Nblocks", 1) > 1
         for dim in self.dims:
             idim = self.dims[dim]
-            alpha_new = compute_smooth_extrema(self, M_lv, dim)[crop(None,None,idim)]
+            alpha_new = compute_smooth_extrema(
+                self, M_lv, dim, neighborhood_min=not block_sed
+            )[crop(None, None, idim)]
+            if block_sed:
+                self.minimize_alpha_across_blocks(alpha_new, dims=(dim,))
             alpha = np.where(alpha_new < alpha, alpha_new, alpha)
 
     tolerance = self.tolerance if self.p > 0 else 0.0
@@ -357,10 +365,15 @@ def compute_min(A, Amin, idim):
     Amin[cut(None,-1,idim)] = np.minimum(A[cut(None,-1,idim)],   A[cut(1,None,idim)])
     Amin[cut( 1,None,idim)] = np.minimum(A[cut(None,-1,idim)],Amin[cut(1,None,idim)])
 
-def compute_smooth_extrema(self, U, dim):
+def compute_smooth_extrema(self, U, dim, neighborhood_min=True):
     eps = 0
     idim = self.dims[dim]
     centers = self.centers[dim][self.shape(idim)]
+    # alpha is scale-invariant only if this h shares the length scale of
+    # `centers`. Block-based AMR schemes keep centers at level-0 values and
+    # provide the matching unscaled h via `sed_h_fp` (the level-scaled
+    # h_fp would inflate alpha by 2^level on refined blocks).
+    h_fp = getattr(self, "sed_h_fp", self.h_fp)[dim]
     if is_gpu_array(U):
         # Fully fused path: derivatives and the alpha_L/alpha_R chain are
         # computed inside one kernel from the shifted 5-point views.
@@ -370,15 +383,19 @@ def compute_smooth_extrema(self, U, dim):
             U[sl(3, -1)], U[sl(4, None)],
             centers[sl(None, -4)], centers[sl(1, -3)], centers[sl(2, -2)],
             centers[sl(3, -1)], centers[sl(4, None)],
-            self.h_fp[dim][sl(2, -2)],
+            h_fp[sl(2, -2)],
         )
-        compute_min(alpha, aL, idim)
-        return aL
+        if neighborhood_min:
+            compute_min(alpha, aL, idim)
+            return aL
+        # Per-cell raw alpha (min of left/right); block-based TD calls
+        # ``minimize_alpha_across_blocks`` to apply compute_min across faces.
+        return np.minimum(aL, alpha)
     # First derivative dUdx(i) = [U(i+1)-U(i-1)]/[x_cv(i+1)-x_cv(i-1)]
     dU  = first_order_derivative( U, centers, idim)
     # Second derivative d2Udx2(i) = [dU(i+1)-dU(i-1)]/[x_cv(i+1)-x_cv(i-1)]
     d2U = first_order_derivative(dU, centers[cut(1,-1,idim)], idim)
-    dv = 0.5 * self.h_fp[dim][cut(2,-2,idim)] * d2U
+    dv = 0.5 * h_fp[cut(2,-2,idim)] * d2U
     # Safe denominator: replace zeros with 1 *before* dividing so numpy
     # never emits a divide-by-zero warning; the resulting alpha at those
     # locations is overwritten to 1 immediately below.
@@ -398,8 +415,10 @@ def compute_smooth_extrema(self, U, dim):
     alphaR = np.where(np.abs(dv) <= eps, 1, alphaR)
     alphaR = np.where(alphaR < 1, alphaR, 1)
     alphaR = np.where(alphaR < alphaL, alphaR, alphaL)
-    compute_min(alphaR, alphaL, idim)
-    return alphaL
+    if neighborhood_min:
+        compute_min(alphaR, alphaL, idim)
+        return alphaL
+    return alphaR
 
 def apply_blending(self,trouble,theta):
     if is_gpu_array(theta):

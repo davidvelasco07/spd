@@ -853,9 +853,11 @@ class FV_Scheme(SemiDiscreteScheme):
             self.Comms(M, dim)
             self.apply_BC(dim)
 
-    def Boundaries_scalar(self, M: np.ndarray):
+    def Boundaries_scalar(self, M: np.ndarray, dims=None):
         """Fill ghost cells for an auxiliary scalar field (e.g. the trouble
         indicator) **without** touching the solution ``BC_fp`` buffer.
+
+        ``dims`` optionally restricts the exchange to a subset of axes.
 
         Periodic boundaries wrap around (with MPI halo exchange); every
         physical boundary uses a zero-gradient (copy-interior) extrapolation.
@@ -869,7 +871,10 @@ class FV_Scheme(SemiDiscreteScheme):
         amplify (rather than replace) the high-order flux there.
         """
         ngh = self.Nghc
-        for dim in self.dims:
+        active = self.dims if dims is None else {
+            d: self.dims[d] for d in dims if d in self.dims
+        }
+        for dim in active:
             idim = self.dims[dim]
             BC = self.BC[dim]
             bc = self.BC_fp_scalar[dim]
